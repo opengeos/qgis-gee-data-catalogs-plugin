@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
+  <!-- Background circle representing Earth -->
+  <circle cx="24" cy="24" r="22" fill="#4285F4"/>
+  
+  <!-- Landmass/continents representation -->
+  <ellipse cx="18" cy="20" rx="8" ry="6" fill="#34A853" transform="rotate(-15 18 20)"/>
+  <ellipse cx="30" cy="28" rx="6" ry="5" fill="#34A853" transform="rotate(20 30 28)"/>
+  <ellipse cx="22" cy="32" rx="5" ry="3" fill="#34A853"/>
+  
+  <!-- Data catalog grid overlay -->
+  <g stroke="#FFFFFF" stroke-width="1.5" fill="none" opacity="0.8">
+    <path d="M10 24 H38"/>
+    <path d="M24 8 V40"/>
+    <path d="M12 14 Q24 8 36 14"/>
+    <path d="M12 34 Q24 40 36 34"/>
+  </g>
+  
+  <!-- Database/catalog icon in corner -->
+  <g transform="translate(32, 4)">
+    <rect x="0" y="0" width="12" height="10" rx="2" fill="#FBBC04" stroke="#EA4335" stroke-width="1"/>
+    <line x1="0" y1="3.5" x2="12" y2="3.5" stroke="#EA4335" stroke-width="0.8"/>
+    <line x1="0" y1="6.5" x2="12" y2="6.5" stroke="#EA4335" stroke-width="0.8"/>
+  </g>
+</svg>

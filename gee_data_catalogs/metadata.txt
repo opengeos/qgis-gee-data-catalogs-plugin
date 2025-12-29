@@ -1,0 +1,47 @@
+[general]
+name=Earth Engine Data Catalogs
+qgisMinimumVersion=3.28
+description=Browse, search, and load Google Earth Engine data catalogs directly in QGIS.
+version=0.1.0
+author=Qiusheng Wu
+email=giswqs@gmail.com
+
+about=A comprehensive plugin for exploring and loading Google Earth Engine datasets in QGIS.
+
+    Features:
+    - Browse the complete GEE Data Catalog with categorized datasets
+    - Search datasets by keywords, tags, and providers
+    - Filter data by bounding box, date range, and cloud cover
+    - Preview dataset metadata and visualization parameters
+    - Load EE Image, ImageCollection, and FeatureCollection directly to QGIS
+    - Integration with qgis-geemap-plugin for advanced functionality
+    - Customizable visualization parameters
+    - Support for temporal filtering on ImageCollections
+    - Export capabilities for loaded datasets
+
+    Use this plugin to efficiently discover and visualize Earth Engine data in QGIS.
+
+tracker=https://github.com/opengeos/qgis-gee-data-catalogs-plugin/issues
+repository=https://github.com/opengeos/qgis-gee-data-catalogs-plugin
+
+hasProcessingProvider=no
+
+tags=earth engine, google, gee, remote sensing, satellite, imagery, geospatial, catalog, data
+
+homepage=https://github.com/opengeos/qgis-gee-data-catalogs-plugin
+category=Raster
+icon=icons/icon.svg
+
+experimental=False
+deprecated=False
+
+changelog=
+    0.1.0 - Initial release
+        - GEE Data Catalog browser with categorized datasets
+        - Dataset search and filtering functionality
+        - Bounding box, date range, and cloud cover filters
+        - Load Image, ImageCollection, and FeatureCollection layers
+        - Integration with qgis-geemap-plugin
+        - Update checker functionality
+        - Settings panel for configuration
+
