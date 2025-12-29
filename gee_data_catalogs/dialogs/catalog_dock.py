@@ -404,7 +404,7 @@ class CatalogDockWidget(QDockWidget):
 
         # Header
         header_layout = QHBoxLayout()
-        header_label = QLabel("Earth Engine Data Catalog")
+        header_label = QLabel("Earth Engine Data Catalogs")
         header_font = QFont()
         header_font.setPointSize(12)
         header_font.setBold(True)
