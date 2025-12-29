@@ -7,8 +7,8 @@ A comprehensive QGIS plugin for browsing, searching, and loading Google Earth En
 ## Features
 
 - **Dynamic Data Catalog Browser**: Automatically loads datasets from official GEE catalog and community datasets
-  - [Official GEE Catalog](https://github.com/opengeos/Earth-Engine-Catalog) - 900+ datasets
-  - [Awesome GEE Community Datasets](https://github.com/samapriya/awesome-gee-community-datasets) - 300+ community datasets
+  - [Official GEE Catalog](https://github.com/opengeos/Earth-Engine-Catalog) - 780+ datasets
+  - [Awesome GEE Community Datasets](https://github.com/samapriya/awesome-gee-community-datasets) - 4,360+ community datasets
 - **Search & Filter**: Search datasets by keywords, tags, providers, data types, and sources
 - **Advanced Filtering for ImageCollections**:
   - Date range filtering
@@ -29,38 +29,109 @@ The plugin dynamically fetches catalog data from:
 
 | Source | URL | Datasets |
 |--------|-----|----------|
-| Official GEE Catalog | [TSV](https://raw.githubusercontent.com/opengeos/Earth-Engine-Catalog/master/gee_catalog.tsv) / [JSON](https://raw.githubusercontent.com/opengeos/Earth-Engine-Catalog/master/gee_catalog.json) | 900+ |
-| Community Datasets | [CSV](https://raw.githubusercontent.com/samapriya/awesome-gee-community-datasets/master/community_datasets.csv) / [JSON](https://raw.githubusercontent.com/samapriya/awesome-gee-community-datasets/master/community_datasets.json) | 300+ |
+| Official GEE Catalog | [TSV](https://raw.githubusercontent.com/opengeos/Earth-Engine-Catalog/master/gee_catalog.tsv) / [JSON](https://raw.githubusercontent.com/opengeos/Earth-Engine-Catalog/master/gee_catalog.json) |780+ |
+| Community Datasets | [CSV](https://raw.githubusercontent.com/samapriya/awesome-gee-community-datasets/master/community_datasets.csv) / [JSON](https://raw.githubusercontent.com/samapriya/awesome-gee-community-datasets/master/community_datasets.json) | 4,360+ |
 
 ## Installation
 
 ### Prerequisites
 
-1. QGIS 3.28 or later
-2. Python packages:
-   - `earthengine-api`: `pip install earthengine-api`
-   - (Optional) `geemap`: `pip install geemap`
+1. **QGIS 3.28 or higher**
+2. **Google Earth Engine Account**: Sign up at [earthengine.google.com](https://earthengine.google.com/)
 
-### From Source
+### Install QGIS and Google Earth Engine
 
-1. Clone or download this repository
-2. Run the installation script:
+#### 1) Install Pixi
+
+#### Linux/macOS (bash/zsh)
 
 ```bash
-python install.py
+curl -fsSL https://pixi.sh/install.sh | sh
 ```
 
-3. Restart QGIS
-4. Enable the plugin in **Plugins → Manage and Install Plugins → Earth Engine Data Catalogs**
+Close and re-open your terminal (or reload your shell) so `pixi` is on your `PATH`. Then confirm:
 
-### Manual Installation
+```bash
+pixi --version
+```
 
-1. Copy the `gee_data_catalogs` folder to your QGIS plugins directory:
+#### Windows (PowerShell)
+
+Open **PowerShell** (preferably as a normal user, Admin not required), then run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm -useb https://pixi.sh/install.ps1 | iex"
+```
+
+Close and re-open PowerShell, then confirm:
+
+```powershell
+pixi --version
+```
+
+---
+
+#### 2) Create a Pixi project
+
+Navigate to a directory where you want to create the project and run:
+
+```bash
+pixi init geo
+cd geo
+```
+
+#### 3) Install the environment
+
+From the `geo` folder:
+
+```bash
+pixi add qgis geemap
+```
+
+#### 4) Authenticate Earth Engine
+
+```bash
+pixi run earthengine authenticate
+```
+
+### Installing the Plugin
+
+#### Method 1: From QGIS Plugin Manager (Recommended)
+
+1. Open QGIS using `pixi run qgis`
+2. Go to **Plugins** → **Manage and Install Plugins...**
+3. Go to the **Settings** tab
+4. Click **Add...** under "Plugin Repositories"
+5. Give a name for the repository, e.g., "OpenGeos"
+6. Enter the URL of the repository: https://qgis.gishub.org/plugins.xml
+7. Click **OK**
+8. Go to the **All** tab
+9. Search for "Earth Engine Data Catalogs"
+10. Select "Earth Engine Data Catalogs" from the list and click **Install Plugin**
+
+#### Method 2: From ZIP File
+
+1. Download the latest release ZIP from <https://qgis.gishub.org>
+2. In QGIS, go to `Plugins` → `Manage and Install Plugins`
+3. Click `Install from ZIP` and select the downloaded file
+4. Enable the plugin in the `Installed` tab
+
+#### Method 3: Manual Installation
+
+1. Clone or download this repository
+2. Copy the `gee_data_catalogs` folder to your QGIS plugins directory:
    - **Linux**: `~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/`
+   - **Windows**: `C:\Users\<username>\AppData\Roaming\QGIS\QGIS3\profiles\default\python\plugins\`
    - **macOS**: `~/Library/Application Support/QGIS/QGIS3/profiles/default/python/plugins/`
-   - **Windows**: `%APPDATA%\QGIS\QGIS3\profiles\default\python\plugins\`
+3. Restart QGIS and enable the plugin
 
-2. Restart QGIS and enable the plugin
+### Uninstalling
+
+```bash
+python install.py --remove
+# or
+./install.sh --remove
+```
 
 ## Usage
 
@@ -122,6 +193,15 @@ s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')\
 
 m.add_layer(s2, {'bands': ['B4', 'B3', 'B2'], 'min': 0, 'max': 3000}, 'Sentinel-2')
 ```
+
+### Inspector
+
+1. Go to the **Inspector** tab
+2. Click the **Start Inspector** button
+3. Click on the map to inspect Earth Engine layer values at that location
+4. Click the **Clear** button to clear the inspector
+5. Click the **Refresh Layers** button to refresh the layers
+
 
 ### Notes
 
