@@ -330,7 +330,7 @@ class GeeDataCatalogs:
 <p>Author: Qiusheng Wu</p>
 
 <h3>Description:</h3>
-<p>A comprehensive plugin for browsing, searching, and loading 
+<p>A comprehensive plugin for browsing, searching, and loading
 Google Earth Engine data catalogs directly in QGIS.</p>
 
 <h3>Features:</h3>

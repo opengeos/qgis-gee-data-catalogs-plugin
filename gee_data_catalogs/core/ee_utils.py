@@ -208,14 +208,14 @@ def add_ee_layer(
         # Filter out params not supported by FeatureCollection.style()
         # style() accepts: color, pointSize, pointShape, width, fillColor, styleProperty, neighborhood, lineType
         valid_style_keys = {
-            'color',
-            'pointSize',
-            'pointShape',
-            'width',
-            'fillColor',
-            'styleProperty',
-            'neighborhood',
-            'lineType',
+            "color",
+            "pointSize",
+            "pointShape",
+            "width",
+            "fillColor",
+            "styleProperty",
+            "neighborhood",
+            "lineType",
         }
         style_params = {k: v for k, v in vis_params.items() if k in valid_style_keys}
 

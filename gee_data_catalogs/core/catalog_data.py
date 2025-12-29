@@ -182,7 +182,7 @@ def _parse_tsv_catalog(content: str) -> List[Dict]:
         List of dataset dictionaries.
     """
     datasets = []
-    reader = csv.DictReader(io.StringIO(content), delimiter='\t')
+    reader = csv.DictReader(io.StringIO(content), delimiter="\t")
 
     for row in reader:
         # Skip deprecated datasets

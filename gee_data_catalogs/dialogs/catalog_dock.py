@@ -164,12 +164,12 @@ class ThumbnailLoaderThread(QThread):
             from urllib.request import urlopen, Request
 
             # Add user agent to avoid 403 errors
-            req = Request(self.thumbnail_url, headers={'User-Agent': 'Mozilla/5.0'})
+            req = Request(self.thumbnail_url, headers={"User-Agent": "Mozilla/5.0"})
             with urlopen(req, timeout=10) as response:
                 img_data = response.read()
-                img_base64 = base64.b64encode(img_data).decode('utf-8')
+                img_base64 = base64.b64encode(img_data).decode("utf-8")
                 # Determine image format from URL
-                img_format = 'png' if self.thumbnail_url.endswith('.png') else 'jpeg'
+                img_format = "png" if self.thumbnail_url.endswith(".png") else "jpeg"
                 self.finished.emit(f"data:image/{img_format};base64,{img_base64}")
         except Exception as e:
             self.error.emit(str(e))
@@ -198,8 +198,8 @@ class ImageListLoaderThread(QThread):
             limited = self.collection.limit(self.limit)
 
             # Get IDs and timestamps in a single efficient call
-            info_list = limited.aggregate_array('system:id').getInfo()
-            time_list = limited.aggregate_array('system:time_start').getInfo()
+            info_list = limited.aggregate_array("system:id").getInfo()
+            time_list = limited.aggregate_array("system:time_start").getInfo()
 
             images_info = []
             for i, image_id in enumerate(info_list):
@@ -209,16 +209,16 @@ class ImageListLoaderThread(QThread):
                     try:
                         timestamp = time_list[i]
                         date_str = datetime.fromtimestamp(timestamp / 1000).strftime(
-                            '%Y-%m-%d'
+                            "%Y-%m-%d"
                         )
                     except Exception:
                         pass
 
                 images_info.append(
                     {
-                        'id': image_id,
-                        'date': date_str,
-                        'properties': {},  # Don't fetch full properties for speed
+                        "id": image_id,
+                        "date": date_str,
+                        "properties": {},  # Don't fetch full properties for speed
                     }
                 )
 
@@ -263,10 +263,10 @@ class InspectorWorker(QThread):
                         ).first()
                         props = sample.getInfo()
 
-                        if props and 'properties' in props:
+                        if props and "properties" in props:
                             results[layer_name] = {
-                                'type': 'Image',
-                                'properties': props['properties'],
+                                "type": "Image",
+                                "properties": props["properties"],
                             }
 
                     elif isinstance(ee_object, ee.ImageCollection):
@@ -277,10 +277,10 @@ class InspectorWorker(QThread):
                         ).first()
                         props = sample.getInfo()
 
-                        if props and 'properties' in props:
+                        if props and "properties" in props:
                             results[layer_name] = {
-                                'type': 'ImageCollection',
-                                'properties': props['properties'],
+                                "type": "ImageCollection",
+                                "properties": props["properties"],
                             }
 
                     elif isinstance(ee_object, ee.FeatureCollection):
@@ -292,13 +292,13 @@ class InspectorWorker(QThread):
                             # Get first 5 features
                             features = filtered.limit(5).getInfo()
                             results[layer_name] = {
-                                'type': 'FeatureCollection',
-                                'count': count,
-                                'features': features.get('features', []),
+                                "type": "FeatureCollection",
+                                "count": count,
+                                "features": features.get("features", []),
                             }
 
                 except Exception as e:
-                    results[layer_name] = {'type': 'Error', 'error': str(e)}
+                    results[layer_name] = {"type": "Error", "error": str(e)}
 
             self.finished.emit(results)
 
@@ -337,9 +337,9 @@ class InspectorMapTool:
                 )
 
                 map_crs = self.canvas().mapSettings().destinationCrs()
-                wgs84 = QgsCoordinateReferenceSystem('EPSG:4326')
+                wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
 
-                if map_crs.authid() != 'EPSG:4326':
+                if map_crs.authid() != "EPSG:4326":
                     transform = QgsCoordinateTransform(
                         map_crs, wgs84, QgsProject.instance()
                     )
@@ -470,10 +470,10 @@ class CatalogDockWidget(QDockWidget):
 
             extent = self.iface.mapCanvas().extent()
             map_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
-            wgs84 = QgsCoordinateReferenceSystem('EPSG:4326')
+            wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
 
             # Transform extent to WGS84 if needed
-            if map_crs.authid() != 'EPSG:4326':
+            if map_crs.authid() != "EPSG:4326":
                 transform = QgsCoordinateTransform(
                     map_crs, wgs84, QgsProject.instance()
                 )
@@ -1193,11 +1193,11 @@ class CatalogDockWidget(QDockWidget):
         else:
             # For official datasets, show the URL and script
             if dataset.get("url"):
-                url = dataset['url']
+                url = dataset["url"]
                 info_lines.append(f"<b>URL:</b> <a href='{url}'>{url}</a>")
 
             if dataset.get("script"):
-                script = dataset['script']
+                script = dataset["script"]
                 info_lines.append(f"<b>Script:</b> <a href='{script}'>{script}</a>")
 
         # Store current HTML without thumbnail
@@ -1252,11 +1252,11 @@ class CatalogDockWidget(QDockWidget):
                 import base64
                 from urllib.request import urlopen, Request
 
-                req = Request(thumbnail_url, headers={'User-Agent': 'Mozilla/5.0'})
+                req = Request(thumbnail_url, headers={"User-Agent": "Mozilla/5.0"})
                 with urlopen(req, timeout=5) as response:
                     img_data = response.read()
-                    img_base64 = base64.b64encode(img_data).decode('utf-8')
-                    img_format = 'png' if thumbnail_url.endswith('.png') else 'jpeg'
+                    img_base64 = base64.b64encode(img_data).decode("utf-8")
+                    img_format = "png" if thumbnail_url.endswith(".png") else "jpeg"
                     info_lines.append(
                         f"<br><img src='data:image/{img_format};base64,{img_base64}' width='300' style='border: 1px solid #ccc; border-radius: 4px;'><br>"
                     )
@@ -1296,11 +1296,11 @@ class CatalogDockWidget(QDockWidget):
         else:
             # For official datasets, show the URL and script
             if dataset.get("url"):
-                url = dataset['url']
+                url = dataset["url"]
                 info_lines.append(f"<b>URL:</b> <a href='{url}'>{url}</a>")
 
             if dataset.get("script"):
-                script = dataset['script']
+                script = dataset["script"]
                 info_lines.append(f"<b>Script:</b> <a href='{script}'>{script}</a>")
 
         self.search_info_text.setHtml("<br>".join(info_lines))
@@ -1505,9 +1505,9 @@ class CatalogDockWidget(QDockWidget):
                 cloud_cover = self.cloud_cover_spin.value()
                 # Try common cloud properties
                 for prop in [
-                    'CLOUDY_PIXEL_PERCENTAGE',
-                    'CLOUD_COVER',
-                    'CLOUD_COVERAGE_ASSESSMENT',
+                    "CLOUDY_PIXEL_PERCENTAGE",
+                    "CLOUD_COVER",
+                    "CLOUD_COVERAGE_ASSESSMENT",
                 ]:
                     try:
                         collection = collection.filter(ee.Filter.lt(prop, cloud_cover))
@@ -1585,7 +1585,7 @@ class CatalogDockWidget(QDockWidget):
                 vis_params = self._build_vis_params()
                 for item in selected_items:
                     img_info = item.data(Qt.UserRole)
-                    image_id = img_info['id']
+                    image_id = img_info["id"]
                     name = f"{self.layer_name_input.text().strip() or asset_id.split('/')[-1]} - {img_info['date']}"
 
                     ee_image = ee.Image(image_id)
@@ -1719,7 +1719,7 @@ class CatalogDockWidget(QDockWidget):
             List of hex color strings, or empty list if not a valid colormap.
         """
         # Check if it looks like a color list rather than a colormap name
-        if ',' in name or name.startswith('#') or name.startswith('rgb'):
+        if "," in name or name.startswith("#") or name.startswith("rgb"):
             return []
 
         try:
@@ -1895,7 +1895,7 @@ class CatalogDockWidget(QDockWidget):
 
             palette = self.palette_input.text().strip()
             if palette:
-                if ',' in palette:
+                if "," in palette:
                     palette_list = [p.strip() for p in palette.split(",")]
                     vis_parts.append(f"'palette': {palette_list}")
                 else:
@@ -1922,7 +1922,7 @@ class CatalogDockWidget(QDockWidget):
             palette = self.palette_input.text().strip()
             if palette:
                 # For FeatureCollection, use color instead of palette
-                if ',' in palette:
+                if "," in palette:
                     colors = [p.strip() for p in palette.split(",")]
                     vis_parts.append(f"'color': '{colors[0]}'")
                 else:
@@ -1961,7 +1961,7 @@ class CatalogDockWidget(QDockWidget):
 
             palette = self.palette_input.text().strip()
             if palette:
-                if ',' in palette:
+                if "," in palette:
                     palette_list = [p.strip() for p in palette.split(",")]
                     vis_parts.append(f"'palette': {palette_list}")
                 else:
@@ -2027,25 +2027,25 @@ class CatalogDockWidget(QDockWidget):
                 pass
 
             # Create a patched geemap module that uses our QGISMap
-            patched_geemap = types.ModuleType('geemap')
+            patched_geemap = types.ModuleType("geemap")
             patched_geemap.Map = QGISMap
 
             # Try to copy commonly used attributes from real geemap
             try:
                 import geemap as real_geemap
 
-                for attr in ['ee_initialize', 'basemaps', 'coreutils', '__version__']:
+                for attr in ["ee_initialize", "basemaps", "coreutils", "__version__"]:
                     if hasattr(real_geemap, attr):
                         setattr(patched_geemap, attr, getattr(real_geemap, attr))
             except ImportError:
                 pass
 
             # Patch sys.modules to ensure our geemap is used for imports
-            original_geemap = sys.modules.get('geemap')
-            sys.modules['geemap'] = patched_geemap
+            original_geemap = sys.modules.get("geemap")
+            sys.modules["geemap"] = patched_geemap
 
             # Also patch qgis_geemap if it exists, to prevent it from being used
-            original_qgis_geemap = sys.modules.get('qgis_geemap.core.qgis_map')
+            original_qgis_geemap = sys.modules.get("qgis_geemap.core.qgis_map")
 
             # Add geemap to namespace
             namespace["geemap"] = patched_geemap
@@ -2064,12 +2064,12 @@ class CatalogDockWidget(QDockWidget):
             finally:
                 # Restore original modules
                 if original_geemap is not None:
-                    sys.modules['geemap'] = original_geemap
+                    sys.modules["geemap"] = original_geemap
                 else:
-                    sys.modules.pop('geemap', None)
+                    sys.modules.pop("geemap", None)
 
                 if original_qgis_geemap is not None:
-                    sys.modules['qgis_geemap.core.qgis_map'] = original_qgis_geemap
+                    sys.modules["qgis_geemap.core.qgis_map"] = original_qgis_geemap
 
         except Exception as e:
             import traceback
@@ -2124,11 +2124,11 @@ class CatalogDockWidget(QDockWidget):
                     ):
                         geometry = (
                             ee_object.geometry()
-                            if hasattr(ee_object, 'geometry')
+                            if hasattr(ee_object, "geometry")
                             else ee_object
                         )
                         bounds = geometry.bounds().getInfo()
-                        coords = bounds['coordinates'][0]
+                        coords = bounds["coordinates"][0]
 
                         # Extract min/max coordinates
                         lons = [c[0] for c in coords]
@@ -2151,7 +2151,7 @@ class CatalogDockWidget(QDockWidget):
                         # Get the geometry/footprint
                         geometry = img.geometry()
                         bounds = geometry.bounds().getInfo()
-                        coords = bounds['coordinates'][0]
+                        coords = bounds["coordinates"][0]
 
                         lons = [c[0] for c in coords]
                         lats = [c[1] for c in coords]
@@ -2204,7 +2204,7 @@ class CatalogDockWidget(QDockWidget):
                     height = current_extent.height()
 
                     # Create new extent centered on lon/lat (in map CRS coordinates)
-                    if map_crs.authid() == 'EPSG:4326':
+                    if map_crs.authid() == "EPSG:4326":
                         # Map is already in WGS84, use coordinates directly
                         new_extent = QgsRectangle(
                             lon - width / 2,
@@ -2214,7 +2214,7 @@ class CatalogDockWidget(QDockWidget):
                         )
                     else:
                         # Need to transform from WGS84 to map CRS
-                        wgs84 = QgsCoordinateReferenceSystem('EPSG:4326')
+                        wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
                         transform = QgsCoordinateTransform(
                             wgs84, map_crs, QgsProject.instance()
                         )
@@ -2271,19 +2271,19 @@ class CatalogDockWidget(QDockWidget):
     def _load_code_example(self, index):
         """Load a code example."""
         examples = {
-            1: '''# DEM with custom palette
+            1: """# DEM with custom palette
 import ee
 import geemap
 
 m = geemap.Map()
 dem = ee.Image('USGS/SRTMGL1_003')
 vis = {
-    'min': 0, 
-    'max': 4000, 
+    'min': 0,
+    'max': 4000,
     'palette': ['006633', 'E5FFCC', '662A00', 'D8D8D8', 'F5F5F5']
 }
-m.add_layer(dem, vis, 'SRTM DEM')''',
-            2: '''# Landsat 9 True Color
+m.add_layer(dem, vis, 'SRTM DEM')""",
+            2: """# Landsat 9 True Color
 import ee
 import geemap
 
@@ -2294,8 +2294,8 @@ l9 = ee.ImageCollection('LANDSAT/LC09/C02/T1_L2')\\
     .median()
 
 vis = {'bands': ['SR_B4', 'SR_B3', 'SR_B2'], 'min': 7000, 'max': 12000}
-m.add_layer(l9, vis, 'Landsat 9 RGB')''',
-            3: '''# Sentinel-2 with filters
+m.add_layer(l9, vis, 'Landsat 9 RGB')""",
+            3: """# Sentinel-2 with filters
 import ee
 import geemap
 
@@ -2306,8 +2306,8 @@ s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')\\
     .median()
 
 vis = {'bands': ['B4', 'B3', 'B2'], 'min': 0, 'max': 3000}
-m.add_layer(s2, vis, 'Sentinel-2 Summer 2023')''',
-            4: '''# NDVI Calculation
+m.add_layer(s2, vis, 'Sentinel-2 Summer 2023')""",
+            4: """# NDVI Calculation
 import ee
 import geemap
 
@@ -2319,8 +2319,8 @@ s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')\\
 
 ndvi = s2.normalizedDifference(['B8', 'B4']).rename('NDVI')
 vis = {'min': -0.2, 'max': 0.8, 'palette': ['red', 'yellow', 'green']}
-m.add_layer(ndvi, vis, 'NDVI')''',
-            5: '''# Styled FeatureCollection
+m.add_layer(ndvi, vis, 'NDVI')""",
+            5: """# Styled FeatureCollection
 import ee
 import geemap
 
@@ -2333,8 +2333,8 @@ styled = countries.style(
     fillColor='00000000',
     width=2
 )
-m.add_layer(styled, {}, 'Country Boundaries')''',
-            6: '''# Dynamic World Land Cover
+m.add_layer(styled, {}, 'Country Boundaries')""",
+            6: """# Dynamic World Land Cover
 import ee
 import geemap
 
@@ -2347,10 +2347,10 @@ dw = ee.ImageCollection('GOOGLE/DYNAMICWORLD/V1')\\
 vis = {
     'min': 0,
     'max': 8,
-    'palette': ['#419BDF', '#397D49', '#88B053', '#7A87C6', 
+    'palette': ['#419BDF', '#397D49', '#88B053', '#7A87C6',
                 '#E49635', '#DFC35A', '#C4281B', '#A59B8F', '#B39FE1']
 }
-m.add_layer(dw, vis, 'Dynamic World 2023')''',
+m.add_layer(dw, vis, 'Dynamic World 2023')""",
         }
 
         if index in examples:
@@ -2490,18 +2490,18 @@ m.add_layer(dw, vis, 'Dynamic World 2023')''',
             layer_item = QTreeWidgetItem([layer_name, ""])
             layer_item.setFont(0, QFont("", -1, QFont.Bold))
 
-            if data.get('type') == 'Error':
+            if data.get("type") == "Error":
                 error_item = QTreeWidgetItem(
-                    ["Error", data.get('error', 'Unknown error')]
+                    ["Error", data.get("error", "Unknown error")]
                 )
                 error_item.setForeground(1, Qt.red)
                 layer_item.addChild(error_item)
 
-            elif data.get('type') in ['Image', 'ImageCollection']:
-                type_item = QTreeWidgetItem(["Type", data.get('type')])
+            elif data.get("type") in ["Image", "ImageCollection"]:
+                type_item = QTreeWidgetItem(["Type", data.get("type")])
                 layer_item.addChild(type_item)
 
-                properties = data.get('properties', {})
+                properties = data.get("properties", {})
                 if properties:
                     for key, value in sorted(properties.items()):
                         # Format value
@@ -2515,19 +2515,19 @@ m.add_layer(dw, vis, 'Dynamic World 2023')''',
                         prop_item = QTreeWidgetItem([key, value_str])
                         layer_item.addChild(prop_item)
 
-            elif data.get('type') == 'FeatureCollection':
+            elif data.get("type") == "FeatureCollection":
                 type_item = QTreeWidgetItem(["Type", "FeatureCollection"])
                 layer_item.addChild(type_item)
 
                 count_item = QTreeWidgetItem(
-                    ["Feature Count", str(data.get('count', 0))]
+                    ["Feature Count", str(data.get("count", 0))]
                 )
                 layer_item.addChild(count_item)
 
-                features = data.get('features', [])
+                features = data.get("features", [])
                 for i, feature in enumerate(features[:5]):  # Limit to 5 features
                     feature_item = QTreeWidgetItem([f"Feature {i+1}", ""])
-                    properties = feature.get('properties', {})
+                    properties = feature.get("properties", {})
 
                     for key, value in sorted(properties.items()):
                         if isinstance(value, float):
