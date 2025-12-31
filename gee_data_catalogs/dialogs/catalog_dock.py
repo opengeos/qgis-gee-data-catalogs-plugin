@@ -295,7 +295,9 @@ class InspectorWorker(QThread):
                             # By removing geometries, we reduce data transfer significantly
                             # This is critical for FeatureCollections with complex geometries
                             features_without_geom = filtered.map(
-                                lambda f: ee.Feature(None, f.toDictionary(f.propertyNames()))
+                                lambda f: ee.Feature(
+                                    None, f.toDictionary(f.propertyNames())
+                                )
                             )
 
                             # Limit to 10 features for display and get the data
@@ -1642,11 +1644,12 @@ class CatalogDockWidget(QDockWidget):
                         raise ValueError(f"Could not load asset: {asset_id}")
 
                 # Build vis_params based on asset type
-                is_feature_collection = (
-                    asset_type == "FeatureCollection"
-                    or isinstance(ee_object, ee.FeatureCollection)
+                is_feature_collection = asset_type == "FeatureCollection" or isinstance(
+                    ee_object, ee.FeatureCollection
                 )
-                vis_params = self._build_vis_params(for_feature_collection=is_feature_collection)
+                vis_params = self._build_vis_params(
+                    for_feature_collection=is_feature_collection
+                )
                 name = self.layer_name_input.text().strip() or asset_id.split("/")[-1]
 
                 add_ee_layer(ee_object, vis_params, name[:50])

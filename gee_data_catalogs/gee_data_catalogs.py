@@ -225,7 +225,9 @@ class GeeDataCatalogs:
 
             # Get current layer names from QGIS
             project = QgsProject.instance()
-            existing_layer_names = {layer.name() for layer in project.mapLayers().values()}
+            existing_layer_names = {
+                layer.name() for layer in project.mapLayers().values()
+            }
 
             # Get registered EE layers
             ee_layers = get_ee_layers()

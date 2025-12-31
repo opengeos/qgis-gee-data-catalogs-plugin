@@ -36,7 +36,7 @@ experimental=False
 deprecated=False
 
 changelog=
-    0.2.0 
+    0.2.0
         - Improve performance of the Inspector tool for FeatureCollection layers
         - Fix layer refresh issue for the Inspector tool
         - Fix layer styling issue for FeatureCollection layers
