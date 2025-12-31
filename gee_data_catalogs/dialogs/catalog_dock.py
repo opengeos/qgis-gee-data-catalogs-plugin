@@ -2035,8 +2035,6 @@ class CatalogDockWidget(QDockWidget):
 
             vis_min_text = self.vis_min_input.text().strip()
             vis_max_text = self.vis_max_input.text().strip()
-            if vis_min_text and vis_max_text:
-                try:
 
             vis_min = None
             vis_max = None
