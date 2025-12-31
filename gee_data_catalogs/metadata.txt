@@ -2,7 +2,7 @@
 name=Earth Engine Data Catalogs
 qgisMinimumVersion=3.28
 description=Browse, search, and load Google Earth Engine data catalogs directly in QGIS.
-version=0.1.0
+version=0.2.0
 author=Qiusheng Wu
 email=giswqs@gmail.com
 
@@ -36,6 +36,10 @@ experimental=False
 deprecated=False
 
 changelog=
+    0.2.0 
+        - Improve performance of the Inspector tool for FeatureCollection layers
+        - Fix layer refresh issue for the Inspector tool
+        - Fix layer styling issue for FeatureCollection layers
     0.1.0 - Initial release
         - GEE Data Catalog browser with categorized datasets
         - Dataset search and filtering functionality

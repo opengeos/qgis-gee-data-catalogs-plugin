@@ -10,6 +10,7 @@ import os
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QMenu, QToolBar, QMessageBox
+from qgis.core import QgsProject
 
 
 class GeeDataCatalogs:
@@ -168,8 +169,17 @@ class GeeDataCatalogs:
             parent=self.iface.mainWindow(),
         )
 
+        # Connect to QGIS project signals to track layer removal
+        QgsProject.instance().layersRemoved.connect(self._on_layers_removed)
+
     def unload(self):
         """Remove the plugin menu item and icon from QGIS GUI."""
+        # Disconnect project signals
+        try:
+            QgsProject.instance().layersRemoved.disconnect(self._on_layers_removed)
+        except Exception:
+            pass
+
         # Remove dock widgets
         if self._catalog_dock:
             self.iface.removeDockWidget(self._catalog_dock)
@@ -202,6 +212,34 @@ class GeeDataCatalogs:
                 pass
         except Exception:
             # Silently fail - user can manually initialize
+            pass
+
+    def _on_layers_removed(self, layer_ids):
+        """Handle layer removal to clean up EE layer registry.
+
+        Args:
+            layer_ids: List of layer IDs that were removed.
+        """
+        try:
+            from .core.ee_utils import remove_ee_layer_from_registry, get_ee_layers
+
+            # Get current layer names from QGIS
+            project = QgsProject.instance()
+            existing_layer_names = {layer.name() for layer in project.mapLayers().values()}
+
+            # Get registered EE layers
+            ee_layers = get_ee_layers()
+
+            # Remove any EE layers that no longer exist in QGIS
+            for layer_name in list(ee_layers.keys()):
+                if layer_name not in existing_layer_names:
+                    remove_ee_layer_from_registry(layer_name)
+
+            # Update inspector layer count if catalog dock is visible
+            if self._catalog_dock:
+                self._catalog_dock._refresh_inspector_layers()
+        except Exception:
+            # Silently fail to avoid disrupting layer removal
             pass
 
     def initialize_ee(self):

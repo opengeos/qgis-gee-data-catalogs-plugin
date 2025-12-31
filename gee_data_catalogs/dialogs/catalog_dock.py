@@ -286,15 +286,26 @@ class InspectorWorker(QThread):
                     elif isinstance(ee_object, ee.FeatureCollection):
                         # Filter features at the point
                         filtered = ee_object.filterBounds(point_geom)
+
+                        # First check if there are any features (fast operation)
                         count = filtered.size().getInfo()
 
                         if count > 0:
-                            # Get first 5 features
-                            features = filtered.limit(5).getInfo()
+                            # Remove geometries to improve performance
+                            # By removing geometries, we reduce data transfer significantly
+                            # This is critical for FeatureCollections with complex geometries
+                            features_without_geom = filtered.map(
+                                lambda f: ee.Feature(None, f.toDictionary(f.propertyNames()))
+                            )
+
+                            # Limit to 10 features for display and get the data
+                            limited = features_without_geom.limit(10)
+                            features_info = limited.getInfo()
+
                             results[layer_name] = {
                                 "type": "FeatureCollection",
                                 "count": count,
-                                "features": features.get("features", []),
+                                "features": features_info.get("features", []),
                             }
 
                 except Exception as e:
@@ -967,6 +978,12 @@ class CatalogDockWidget(QDockWidget):
         self.inspector_tree.header().setStretchLastSection(True)
         layout.addWidget(self.inspector_tree)
 
+        # Progress bar
+        self.inspector_progress_bar = QProgressBar()
+        self.inspector_progress_bar.setVisible(False)
+        self.inspector_progress_bar.setTextVisible(False)
+        layout.addWidget(self.inspector_progress_bar)
+
         # Inspector status
         self.inspector_status_label = QLabel(
             "Ready to inspect. Click 'Start Inspector' and then click on the map."
@@ -1624,7 +1641,12 @@ class CatalogDockWidget(QDockWidget):
                     else:
                         raise ValueError(f"Could not load asset: {asset_id}")
 
-                vis_params = self._build_vis_params()
+                # Build vis_params based on asset type
+                is_feature_collection = (
+                    asset_type == "FeatureCollection"
+                    or isinstance(ee_object, ee.FeatureCollection)
+                )
+                vis_params = self._build_vis_params(for_feature_collection=is_feature_collection)
                 name = self.layer_name_input.text().strip() or asset_id.split("/")[-1]
 
                 add_ee_layer(ee_object, vis_params, name[:50])
@@ -2436,6 +2458,7 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
         self.inspector_tree.clear()
         self.inspector_lon_label.setText("--")
         self.inspector_lat_label.setText("--")
+        self.inspector_progress_bar.setVisible(False)
         self.inspector_status_label.setText("Results cleared.")
         self.inspector_status_label.setStyleSheet("color: gray; font-size: 10px;")
 
@@ -2464,10 +2487,13 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
         # Convert map scale to Earth Engine scale (meters)
         ee_scale = max(10, min(1000, scale / 3000))
 
-        # Start inspector worker
+        # Show progress bar and update status
+        self.inspector_progress_bar.setVisible(True)
+        self.inspector_progress_bar.setRange(0, 0)  # Indeterminate mode
         self.inspector_status_label.setText(f"Inspecting {len(ee_layers)} layer(s)...")
         self.inspector_status_label.setStyleSheet("color: blue; font-size: 10px;")
 
+        # Start inspector worker
         self._inspector_thread = InspectorWorker(ee_layers, (lon, lat), int(ee_scale))
         self._inspector_thread.finished.connect(self._on_inspection_finished)
         self._inspector_thread.error.connect(self._on_inspection_error)
@@ -2479,6 +2505,9 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
     def _on_inspection_finished(self, results):
         """Handle inspection results."""
         import json
+
+        # Hide progress bar
+        self.inspector_progress_bar.setVisible(False)
 
         if not results:
             self.inspector_status_label.setText("No data found at this location.")
@@ -2525,7 +2554,7 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
                 layer_item.addChild(count_item)
 
                 features = data.get("features", [])
-                for i, feature in enumerate(features[:5]):  # Limit to 5 features
+                for i, feature in enumerate(features[:10]):  # Show up to 10 features
                     feature_item = QTreeWidgetItem([f"Feature {i+1}", ""])
                     properties = feature.get("properties", {})
 
@@ -2554,6 +2583,9 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
 
     def _on_inspection_error(self, error):
         """Handle inspection error."""
+        # Hide progress bar
+        self.inspector_progress_bar.setVisible(False)
+
         self.inspector_status_label.setText(f"Error: {error}")
         self.inspector_status_label.setStyleSheet("color: red; font-size: 10px;")
 
