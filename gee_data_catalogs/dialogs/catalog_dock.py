@@ -2036,16 +2036,30 @@ class CatalogDockWidget(QDockWidget):
             vis_max_text = self.vis_max_input.text().strip()
             if vis_min_text and vis_max_text:
                 try:
-                    vis_min = float(vis_min_text)
-                    vis_max = float(vis_max_text)
-                    if vis_max >= vis_min:
-                        vis_parts.append(f"'min': {vis_min}")
-                        vis_parts.append(f"'max': {vis_max}")
-                except ValueError:
-                    # If the min/max values are not valid numbers, ignore them and
-                    # fall back to using default visualization parameters.
-                    pass
 
+            vis_min = None
+            vis_max = None
+
+            if vis_min_text:
+                try:
+                    vis_min = float(vis_min_text)
+                except ValueError:
+                    vis_min = None
+
+            if vis_max_text:
+                try:
+                    vis_max = float(vis_max_text)
+                except ValueError:
+                    vis_max = None
+
+            if vis_min is not None and vis_max is not None:
+                if vis_max > vis_min:
+                    vis_parts.append(f"'min': {vis_min}")
+                    vis_parts.append(f"'max': {vis_max}")
+            elif vis_min is not None:
+                vis_parts.append(f"'min': {vis_min}")
+            elif vis_max is not None:
+                vis_parts.append(f"'max': {vis_max}")
             palette = self.palette_input.text().strip()
             if palette:
                 if "," in palette:
