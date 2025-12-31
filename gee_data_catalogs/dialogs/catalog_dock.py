@@ -1958,7 +1958,7 @@ class CatalogDockWidget(QDockWidget):
                 try:
                     vis_min = float(vis_min_text)
                     vis_max = float(vis_max_text)
-                    if vis_max > vis_min:
+                    if vis_max >= vis_min:
                         vis_parts.append(f"'min': {vis_min}")
                         vis_parts.append(f"'max': {vis_max}")
                 except ValueError:
