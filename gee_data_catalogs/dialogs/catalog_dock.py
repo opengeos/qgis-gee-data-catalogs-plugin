@@ -1731,16 +1731,28 @@ class CatalogDockWidget(QDockWidget):
         # Parse min/max values if provided
         vis_min_text = self.vis_min_input.text().strip()
         vis_max_text = self.vis_max_input.text().strip()
-        if vis_min_text and vis_max_text and not for_feature_collection:
-            try:
-                vis_min = float(vis_min_text)
-                vis_max = float(vis_max_text)
-                if vis_max > vis_min:
-                    vis_params["min"] = vis_min
-                    vis_params["max"] = vis_max
-            except ValueError:
-                pass  # Skip if values are not valid numbers
+        if not for_feature_collection:
+            vis_min = None
+            vis_max = None
 
+            if vis_min_text:
+                try:
+                    vis_min = float(vis_min_text)
+                    vis_params["min"] = vis_min
+                except ValueError:
+                    pass  # Skip if value is not a valid number
+
+            if vis_max_text:
+                try:
+                    vis_max = float(vis_max_text)
+                    vis_params["max"] = vis_max
+                except ValueError:
+                    pass  # Skip if value is not a valid number
+
+            # If both values are provided, enforce that max > min as in original behavior.
+            if vis_min is not None and vis_max is not None and vis_max <= vis_min:
+                vis_params.pop("min", None)
+                vis_params.pop("max", None)
         palette = self.palette_input.text().strip()
         if palette:
             # Check if it's a matplotlib colormap name
