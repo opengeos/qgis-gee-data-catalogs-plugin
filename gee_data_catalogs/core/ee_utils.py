@@ -172,6 +172,15 @@ def add_ee_layer(
 
     vis_params = vis_params or {}
 
+    # Remove existing layer with the same name if it exists
+    project = QgsProject.instance()
+    existing_layers = project.mapLayersByName(name)
+    for existing_layer in existing_layers:
+        project.removeMapLayer(existing_layer.id())
+
+    # Remove from Inspector registry
+    remove_ee_layer_from_registry(name)
+
     # Save current map extent to preserve it
     from qgis.utils import iface
 
