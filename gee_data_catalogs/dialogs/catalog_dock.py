@@ -1962,6 +1962,7 @@ class CatalogDockWidget(QDockWidget):
                         vis_parts.append(f"'min': {vis_min}")
                         vis_parts.append(f"'max': {vis_max}")
                 except ValueError:
+                    # Ignore invalid numeric visualization parameters; omit min/max
                     pass
 
             palette = self.palette_input.text().strip()
