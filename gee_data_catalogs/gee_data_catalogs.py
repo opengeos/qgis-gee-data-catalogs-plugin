@@ -172,11 +172,18 @@ class GeeDataCatalogs:
         # Connect to QGIS project signals to track layer removal
         QgsProject.instance().layersRemoved.connect(self._on_layers_removed)
 
+        # Connect to project read signal to refresh EE layers when project opens
+        QgsProject.instance().readProject.connect(self._on_project_read)
+
     def unload(self):
         """Remove the plugin menu item and icon from QGIS GUI."""
         # Disconnect project signals
         try:
             QgsProject.instance().layersRemoved.disconnect(self._on_layers_removed)
+        except Exception:
+            pass
+        try:
+            QgsProject.instance().readProject.disconnect(self._on_project_read)
         except Exception:
             pass
 
@@ -243,6 +250,64 @@ class GeeDataCatalogs:
         except Exception:
             # Silently fail to avoid disrupting layer removal
             pass
+
+    def _on_project_read(self, doc):
+        """Handle project read to refresh Earth Engine layers.
+
+        This automatically refreshes EE tile URLs when a project is opened,
+        ensuring layers render correctly even if the original tiles have expired.
+
+        Args:
+            doc: The QDomDocument of the project (unused).
+        """
+        try:
+            from .core.ee_utils import (
+                is_ee_initialized,
+                try_auto_initialize_ee,
+                refresh_all_ee_layers,
+                is_ee_layer,
+            )
+            from qgis.core import QgsRasterLayer
+
+            # Check if there are any EE layers in the project
+            project = QgsProject.instance()
+            ee_layers = [
+                layer
+                for layer in project.mapLayers().values()
+                if isinstance(layer, QgsRasterLayer) and is_ee_layer(layer)
+            ]
+
+            if not ee_layers:
+                return
+
+            # Try to initialize EE if not already initialized
+            if not is_ee_initialized():
+                if not try_auto_initialize_ee():
+                    self.iface.messageBar().pushWarning(
+                        "GEE Data Catalogs",
+                        f"Found {len(ee_layers)} Earth Engine layer(s) but EE is not initialized. "
+                        "Please initialize Earth Engine to refresh the layers.",
+                    )
+                    return
+
+            # Refresh all EE layers
+            refreshed = refresh_all_ee_layers()
+
+            if refreshed > 0:
+                self.iface.messageBar().pushSuccess(
+                    "GEE Data Catalogs",
+                    f"Refreshed {refreshed} Earth Engine layer(s).",
+                )
+
+            # Update inspector if catalog dock is visible
+            if self._catalog_dock:
+                self._catalog_dock._refresh_inspector_layers()
+
+        except Exception as e:
+            self.iface.messageBar().pushWarning(
+                "GEE Data Catalogs",
+                f"Failed to refresh Earth Engine layers: {str(e)}",
+            )
 
     def initialize_ee(self):
         """Initialize Google Earth Engine."""

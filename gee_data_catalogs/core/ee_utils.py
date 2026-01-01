@@ -4,6 +4,7 @@ Earth Engine Utilities for GEE Data Catalogs
 This module provides utility functions for working with Earth Engine in QGIS.
 """
 
+import json
 import os
 from typing import Any, Dict, List, Optional
 
@@ -265,6 +266,9 @@ def add_ee_layer(
     # Register the layer for Inspector
     add_ee_layer_to_registry(name, ee_object, vis_params)
 
+    # Store EE metadata in layer custom properties for project persistence
+    _store_ee_layer_metadata(layer, ee_object, vis_params)
+
     return layer
 
 
@@ -306,6 +310,172 @@ def clear_ee_layer_registry():
     """Clear all layers from the registry."""
     global _ee_layer_registry
     _ee_layer_registry = {}
+
+
+# Custom property keys for EE layer persistence
+EE_ASSET_ID_KEY = "ee_asset_id"
+EE_VIS_PARAMS_KEY = "ee_vis_params"
+EE_OBJECT_TYPE_KEY = "ee_object_type"
+
+
+def _store_ee_layer_metadata(
+    layer: QgsRasterLayer, ee_object: Any, vis_params: Dict
+) -> None:
+    """Store Earth Engine metadata in layer custom properties.
+
+    This enables layer refresh when reopening a QGIS project.
+
+    Args:
+        layer: The QGIS layer to store metadata on.
+        ee_object: The Earth Engine object.
+        vis_params: Visualization parameters dictionary.
+    """
+    if ee is None:
+        return
+
+    # Determine object type and asset ID
+    asset_id = None
+    object_type = None
+
+    if isinstance(ee_object, ee.Image):
+        object_type = "Image"
+        try:
+            # Try to get the asset ID from the image
+            asset_id = ee_object.get("system:id").getInfo()
+        except Exception:
+            pass
+    elif isinstance(ee_object, ee.ImageCollection):
+        object_type = "ImageCollection"
+        try:
+            asset_id = ee_object.get("system:id").getInfo()
+        except Exception:
+            pass
+    elif isinstance(ee_object, ee.FeatureCollection):
+        object_type = "FeatureCollection"
+        try:
+            asset_id = ee_object.get("system:id").getInfo()
+        except Exception:
+            pass
+
+    # Store metadata as custom properties
+    if asset_id:
+        layer.setCustomProperty(EE_ASSET_ID_KEY, asset_id)
+    if object_type:
+        layer.setCustomProperty(EE_OBJECT_TYPE_KEY, object_type)
+    if vis_params:
+        layer.setCustomProperty(EE_VIS_PARAMS_KEY, json.dumps(vis_params))
+
+
+def is_ee_layer(layer: QgsRasterLayer) -> bool:
+    """Check if a layer is an Earth Engine layer.
+
+    Args:
+        layer: The layer to check.
+
+    Returns:
+        True if the layer has EE metadata, False otherwise.
+    """
+    return layer.customProperty(EE_ASSET_ID_KEY) is not None
+
+
+def refresh_ee_layer(layer: QgsRasterLayer) -> bool:
+    """Refresh an Earth Engine layer's tile URL.
+
+    Regenerates the tile URL from stored metadata and updates the layer source.
+
+    Args:
+        layer: The QGIS layer to refresh.
+
+    Returns:
+        True if refresh was successful, False otherwise.
+    """
+    if ee is None:
+        return False
+
+    # Get stored metadata
+    asset_id = layer.customProperty(EE_ASSET_ID_KEY)
+    object_type = layer.customProperty(EE_OBJECT_TYPE_KEY)
+    vis_params_json = layer.customProperty(EE_VIS_PARAMS_KEY)
+
+    if not asset_id:
+        return False
+
+    # Parse visualization parameters
+    vis_params = {}
+    if vis_params_json:
+        try:
+            vis_params = json.loads(vis_params_json)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    try:
+        # Load the EE object
+        ee_object = load_ee_asset(asset_id, object_type)
+
+        # Generate new tile URL
+        if isinstance(ee_object, ee.FeatureCollection):
+            # Handle FeatureCollection styling
+            valid_style_keys = {
+                "color",
+                "pointSize",
+                "pointShape",
+                "width",
+                "fillColor",
+                "styleProperty",
+                "neighborhood",
+                "lineType",
+            }
+            style_params = {
+                k: v for k, v in vis_params.items() if k in valid_style_keys
+            }
+            styled_fc = ee_object
+            if style_params:
+                styled_fc = ee_object.style(**style_params)
+            tile_url = get_ee_tile_url(styled_fc, {})
+        else:
+            tile_url = get_ee_tile_url(ee_object, vis_params)
+
+        # Update layer source
+        new_uri = f"type=xyz&url={tile_url}&zmax=24&zmin=0"
+        layer.setDataSource(new_uri, layer.name(), "wms")
+
+        # Re-register in the Inspector registry
+        add_ee_layer_to_registry(layer.name(), ee_object, vis_params)
+
+        QgsMessageLog.logMessage(
+            f"Refreshed EE layer: {layer.name()}",
+            "GEE Data Catalogs",
+            Qgis.Info,
+        )
+        return True
+
+    except Exception as e:
+        QgsMessageLog.logMessage(
+            f"Failed to refresh EE layer '{layer.name()}': {e}",
+            "GEE Data Catalogs",
+            Qgis.Warning,
+        )
+        return False
+
+
+def refresh_all_ee_layers() -> int:
+    """Refresh all Earth Engine layers in the current project.
+
+    Returns:
+        Number of layers successfully refreshed.
+    """
+    if ee is None:
+        return 0
+
+    project = QgsProject.instance()
+    refreshed_count = 0
+
+    for layer in project.mapLayers().values():
+        if isinstance(layer, QgsRasterLayer) and is_ee_layer(layer):
+            if refresh_ee_layer(layer):
+                refreshed_count += 1
+
+    return refreshed_count
 
 
 def detect_asset_type(asset_id: str) -> str:
