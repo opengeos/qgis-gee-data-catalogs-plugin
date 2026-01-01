@@ -555,6 +555,32 @@ class CatalogDockWidget(QDockWidget):
             )
             return None
 
+    def _get_cloud_property(self, asset_id: str) -> str:
+        """Determine the correct cloud cover property based on the asset ID.
+
+        Args:
+            asset_id: The Earth Engine asset ID.
+
+        Returns:
+            The cloud cover property name for the dataset.
+        """
+        asset_upper = asset_id.upper()
+
+        # Landsat collections use CLOUD_COVER
+        if "LANDSAT" in asset_upper:
+            return "CLOUD_COVER"
+
+        # MODIS uses different properties but typically doesn't have per-scene cloud
+        if "MODIS" in asset_upper:
+            return "CLOUD_COVER"
+
+        # Sentinel-2 uses CLOUDY_PIXEL_PERCENTAGE
+        if "SENTINEL" in asset_upper or "COPERNICUS/S2" in asset_upper:
+            return "CLOUDY_PIXEL_PERCENTAGE"
+
+        # Default to CLOUDY_PIXEL_PERCENTAGE (most common for optical imagery)
+        return "CLOUDY_PIXEL_PERCENTAGE"
+
     def _create_browse_tab(self):
         """Create the browse tab with category tree."""
         widget = QWidget()
@@ -1564,17 +1590,8 @@ class CatalogDockWidget(QDockWidget):
 
             if self.use_cloud_filter.isChecked():
                 cloud_cover = self.cloud_cover_spin.value()
-                # Try common cloud properties
-                for prop in [
-                    "CLOUDY_PIXEL_PERCENTAGE",
-                    "CLOUD_COVER",
-                    "CLOUD_COVERAGE_ASSESSMENT",
-                ]:
-                    try:
-                        collection = collection.filter(ee.Filter.lt(prop, cloud_cover))
-                        break
-                    except:
-                        continue
+                cloud_prop = self._get_cloud_property(asset_id)
+                collection = collection.filter(ee.Filter.lt(cloud_prop, cloud_cover))
 
             self._filtered_collection = collection
 
@@ -1985,9 +2002,9 @@ class CatalogDockWidget(QDockWidget):
 
             if self.use_cloud_filter.isChecked():
                 cloud_cover = self.cloud_cover_spin.value()
-                code_lines.append(f"# Try common cloud properties")
+                cloud_prop = self._get_cloud_property(asset_id)
                 code_lines.append(
-                    f"collection = collection.filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', {cloud_cover}))"
+                    f"collection = collection.filter(ee.Filter.lt('{cloud_prop}', {cloud_cover}))"
                 )
 
             if self.use_bbox_filter.isChecked():
