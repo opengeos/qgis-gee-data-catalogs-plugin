@@ -418,37 +418,32 @@ class TimeSeriesLoaderThread(QThread):
                 # Reduce to single image
                 image = sub_col.reduce(reducer_func)
 
-                # Check if we have any images
-                count = sub_col.size().getInfo()
-                if count > 0:
-                    # Format label based on frequency
-                    if self.frequency == "day":
-                        label = date_str
-                    elif self.frequency == "week":
-                        label = f"Week of {date_str}"
-                    elif self.frequency == "month":
-                        label = datetime.strptime(date_str, "%Y-%m-%d").strftime(
-                            "%Y-%m"
-                        )
-                    elif self.frequency == "quarter":
-                        dt = datetime.strptime(date_str, "%Y-%m-%d")
-                        quarter = (dt.month - 1) // 3 + 1
-                        label = f"{dt.year} Q{quarter}"
-                    elif self.frequency == "year":
-                        label = datetime.strptime(date_str, "%Y-%m-%d").strftime("%Y")
-                    else:
-                        label = date_str
-
-                    images_data.append(
-                        {
-                            "start_date": date_str,
-                            "end_date": end.format("YYYY-MM-dd").getInfo(),
-                            "count": count,
-                            "label": label,
-                        }
+                # Format label based on frequency
+                if self.frequency == "day":
+                    label = date_str
+                elif self.frequency == "week":
+                    label = f"Week of {date_str}"
+                elif self.frequency == "month":
+                    label = datetime.strptime(date_str, "%Y-%m-%d").strftime(
+                        "%Y-%m"
                     )
-                    labels.append(label)
+                elif self.frequency == "quarter":
+                    dt = datetime.strptime(date_str, "%Y-%m-%d")
+                    quarter = (dt.month - 1) // 3 + 1
+                    label = f"{dt.year} Q{quarter}"
+                elif self.frequency == "year":
+                    label = datetime.strptime(date_str, "%Y-%m-%d").strftime("%Y")
+                else:
+                    label = date_str
 
+                images_data.append(
+                    {
+                        "start_date": date_str,
+                        "end_date": end.format("YYYY-MM-dd").getInfo(),
+                        "label": label,
+                    }
+                )
+                labels.append(label)
                 self.progress.emit(f"Processed {i+1}/{len(dates)} time steps...")
 
             if not images_data:
