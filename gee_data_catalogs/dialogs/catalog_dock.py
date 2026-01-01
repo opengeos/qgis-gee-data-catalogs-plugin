@@ -825,35 +825,32 @@ class CatalogDockWidget(QDockWidget):
         if not filter_text or not filter_text.strip():
             return filters
 
-        # Supported operators
-        operators = ["==", "!=", ">=", "<=", ">", "<"]
+        # Regex to match: property operator value
+        pattern = re.compile(r"^\s*(\S+)\s*(==|!=|>=|<=|>|<)\s*(.+?)\s*$")
 
         for line in filter_text.strip().split("\n"):
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
 
-            # Try to match pattern: property operator value
-            for op in operators:
-                if op in line:
-                    parts = line.split(op, 1)
-                    if len(parts) == 2:
-                        prop_name = parts[0].strip()
-                        value_str = parts[1].strip()
+            match = pattern.match(line)
+            if not match:
+                continue
 
-                        # Try to convert value to appropriate type
-                        try:
-                            # Try as float first
-                            value = float(value_str)
-                            if value.is_integer():
-                                value = int(value)
-                        except ValueError:
-                            # Keep as string (strip quotes if present)
-                            value = value_str.strip("\"'")
+            prop_name, op, value_str = match.groups()
+            value_str = value_str.strip()
 
-                        filters.append((prop_name, op, value))
-                        break
+            # Try to convert value to appropriate type
+            try:
+                # Try as float first
+                value = float(value_str)
+                if value.is_integer():
+                    value = int(value)
+            except ValueError:
+                # Keep as string (strip quotes if present)
+                value = value_str.strip("\"'")
 
+            filters.append((prop_name, op, value))
         return filters
 
     def _apply_property_filters(self, collection, filters: list):
