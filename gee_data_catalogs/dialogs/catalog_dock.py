@@ -440,6 +440,7 @@ class CatalogDockWidget(QDockWidget):
         self._inspector_thread = None
         self._inspector_map_tool = None
         self._inspector_active = False
+        self._js_code_cache = None  # Cache for f.json JavaScript code snippets
 
         self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         self.setMinimumWidth(380)
@@ -1107,6 +1108,221 @@ class CatalogDockWidget(QDockWidget):
 
         return code
 
+    def _load_js_code_cache(self):
+        """Load and cache the f.json file containing JavaScript code snippets.
+
+        Returns:
+            dict: Mapping of asset IDs to JavaScript code, or None if failed.
+        """
+        if self._js_code_cache is not None:
+            return self._js_code_cache
+
+        import json
+        import os
+        import tempfile
+        import time
+        from urllib.request import urlopen, Request
+        from urllib.error import URLError
+
+        # Cache file path
+        cache_dir = os.path.join(tempfile.gettempdir(), "gee_data_catalogs")
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_file = os.path.join(cache_dir, "f.json")
+
+        # Try to load from cache file first (if less than 24 hours old)
+        try:
+            if os.path.exists(cache_file):
+                file_age = time.time() - os.path.getmtime(cache_file)
+                if file_age < 86400 * 7:  # 7 days
+                    with open(cache_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        self._js_code_cache = self._parse_js_code_data(data)
+                        return self._js_code_cache
+        except Exception:
+            pass
+
+        # Download from GitHub
+        url = "https://github.com/opengeos/datasets/releases/download/gee/f.json"
+        try:
+            req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urlopen(req, timeout=30) as response:
+                data = json.loads(response.read().decode("utf-8"))
+
+                # Save to cache file
+                try:
+                    with open(cache_file, "w", encoding="utf-8") as f:
+                        json.dump(data, f)
+                except Exception:
+                    pass
+
+                self._js_code_cache = self._parse_js_code_data(data)
+                return self._js_code_cache
+        except (URLError, Exception) as e:
+            QgsMessageLog.logMessage(
+                f"Failed to load JavaScript code cache: {e}",
+                "GEE Data Catalogs",
+                Qgis.Warning,
+            )
+            self._js_code_cache = {}
+            return self._js_code_cache
+
+    def _parse_js_code_data(self, data):
+        """Parse the f.json data into an asset ID to code mapping.
+
+        Args:
+            data: The parsed JSON data from f.json.
+
+        Returns:
+            dict: Mapping of asset IDs to JavaScript code.
+        """
+        import re
+
+        code_map = {}
+
+        for category in data.get("examples", []):
+            if category.get("name") == "Datasets":
+                for provider in category.get("contents", []):
+                    for item in provider.get("contents", []):
+                        code = item.get("code", "")
+                        if not code:
+                            continue
+
+                        # Extract asset IDs from the code
+                        matches = re.findall(
+                            r"ee\.(Image|ImageCollection|FeatureCollection)\(['\"]([^'\"]+)['\"]\)",
+                            code,
+                        )
+                        for _, asset_id in matches:
+                            if asset_id not in code_map:
+                                code_map[asset_id] = code
+
+        return code_map
+
+    def _get_js_code_for_asset(self, asset_id):
+        """Get JavaScript code for a given asset ID.
+
+        Args:
+            asset_id: The Earth Engine asset ID.
+
+        Returns:
+            str: JavaScript code if found, None otherwise.
+        """
+        cache = self._load_js_code_cache()
+        return cache.get(asset_id)
+
+    def _run_js_code_for_asset(self, asset_id):
+        """Run JavaScript code for an asset by converting to Python.
+
+        Args:
+            asset_id: The Earth Engine asset ID.
+
+        Returns:
+            bool: True if code was found and executed, False otherwise.
+        """
+        js_code = self._get_js_code_for_asset(asset_id)
+        if not js_code:
+            return False
+
+        try:
+            from geemap.conversion import js_snippet_to_py
+
+            # Convert JavaScript to Python
+            py_lines = js_snippet_to_py(
+                js_code,
+                add_new_cell=False,
+                import_ee=True,
+                import_geemap=True,
+                show_map=False,
+                Map="m",
+            )
+
+            if not py_lines:
+                return False
+
+            py_code = "".join(py_lines)
+            # Convert camelCase methods to snake_case
+            py_code = self._camel_to_snake_methods(py_code)
+
+            # Copy the converted code to clipboard
+            clipboard = QApplication.clipboard()
+            clipboard.setText(py_code)
+
+            # Execute the code
+            self._execute_code_internal(py_code)
+            return True
+
+        except Exception as e:
+            QgsMessageLog.logMessage(
+                f"Failed to run JavaScript code for {asset_id}: {e}",
+                "GEE Data Catalogs",
+                Qgis.Warning,
+            )
+            return False
+
+    def _execute_code_internal(self, code):
+        """Execute Python code internally (shared by multiple methods).
+
+        Args:
+            code: Python code to execute.
+        """
+        import sys
+        import types
+
+        # Create a QGIS-compatible Map class
+        QGISMap = self._create_qgis_map_class()
+
+        # Create namespace for execution
+        namespace = {
+            "iface": self.iface,
+        }
+
+        # Import ee
+        try:
+            import ee
+
+            namespace["ee"] = ee
+        except ImportError:
+            pass
+
+        # Create a patched geemap module that uses our QGISMap
+        patched_geemap = types.ModuleType("geemap")
+        patched_geemap.Map = QGISMap
+
+        # Try to copy commonly used attributes from real geemap
+        try:
+            import geemap as real_geemap
+
+            for attr in ["ee_initialize", "basemaps", "coreutils", "__version__"]:
+                if hasattr(real_geemap, attr):
+                    setattr(patched_geemap, attr, getattr(real_geemap, attr))
+        except ImportError:
+            pass
+
+        # Patch sys.modules to ensure our geemap is used for imports
+        original_geemap = sys.modules.get("geemap")
+        sys.modules["geemap"] = patched_geemap
+
+        original_qgis_geemap = sys.modules.get("qgis_geemap.core.qgis_map")
+
+        # Add geemap to namespace
+        namespace["geemap"] = patched_geemap
+
+        # Pre-create a Map instance as 'm' for convenience
+        namespace["m"] = QGISMap()
+        namespace["Map"] = QGISMap
+
+        try:
+            exec(code, namespace)
+        finally:
+            # Restore original modules
+            if original_geemap is not None:
+                sys.modules["geemap"] = original_geemap
+            else:
+                sys.modules.pop("geemap", None)
+
+            if original_qgis_geemap is not None:
+                sys.modules["qgis_geemap.core.qgis_map"] = original_qgis_geemap
+
     def _run_conversion_code(self):
         """Execute the Python code from the conversion tab."""
         code = self.conversion_input.toPlainText()
@@ -1629,6 +1845,12 @@ class CatalogDockWidget(QDockWidget):
         try:
             self._show_progress(f"Loading {asset_id}...")
             QCoreApplication.processEvents()
+
+            # Check if we have JavaScript code for this asset
+            if self._run_js_code_for_asset(asset_id):
+                name = dataset.get("name", asset_id.split("/")[-1])[:50]
+                self._show_success(f"Added layer: {name} (from sample code)")
+                return
 
             vis_params = dataset.get("vis_params", {})
             name = dataset.get("name", asset_id.split("/")[-1])[:50]
@@ -2501,8 +2723,15 @@ class CatalogDockWidget(QDockWidget):
                 """Center the map on an Earth Engine object."""
                 try:
                     import ee
+                    from qgis.core import (
+                        QgsRectangle,
+                        QgsCoordinateReferenceSystem,
+                        QgsCoordinateTransform,
+                        QgsProject,
+                    )
 
                     # Get the bounds of the EE object
+                    bounds = None
                     if isinstance(
                         ee_object, (ee.Geometry, ee.Feature, ee.FeatureCollection)
                     ):
@@ -2512,41 +2741,39 @@ class CatalogDockWidget(QDockWidget):
                             else ee_object
                         )
                         bounds = geometry.bounds().getInfo()
-                        coords = bounds["coordinates"][0]
-
-                        # Extract min/max coordinates
-                        lons = [c[0] for c in coords]
-                        lats = [c[1] for c in coords]
-                        west, east = min(lons), max(lons)
-                        south, north = min(lats), max(lats)
-
-                        # Set extent on QGIS map
-                        from qgis.core import QgsRectangle
-
-                        extent = QgsRectangle(west, south, east, north)
-                        self._iface.mapCanvas().setExtent(extent)
-                        self._iface.mapCanvas().refresh()
                     elif isinstance(ee_object, (ee.Image, ee.ImageCollection)):
                         # For images, try to get geometry from properties
                         img = ee_object
                         if isinstance(ee_object, ee.ImageCollection):
                             img = ee_object.first()
-
-                        # Get the geometry/footprint
                         geometry = img.geometry()
                         bounds = geometry.bounds().getInfo()
-                        coords = bounds["coordinates"][0]
 
+                    if bounds:
+                        coords = bounds["coordinates"][0]
                         lons = [c[0] for c in coords]
                         lats = [c[1] for c in coords]
                         west, east = min(lons), max(lons)
                         south, north = min(lats), max(lats)
 
-                        from qgis.core import QgsRectangle
+                        # Create extent in WGS84
+                        wgs84_extent = QgsRectangle(west, south, east, north)
 
-                        extent = QgsRectangle(west, south, east, north)
-                        self._iface.mapCanvas().setExtent(extent)
-                        self._iface.mapCanvas().refresh()
+                        # Transform to map canvas CRS
+                        canvas = self._iface.mapCanvas()
+                        map_crs = canvas.mapSettings().destinationCrs()
+                        wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
+
+                        if map_crs.authid() != "EPSG:4326":
+                            transform = QgsCoordinateTransform(
+                                wgs84, map_crs, QgsProject.instance()
+                            )
+                            extent = transform.transformBoundingBox(wgs84_extent)
+                        else:
+                            extent = wgs84_extent
+
+                        canvas.setExtent(extent)
+                        canvas.refresh()
                 except Exception:
                     # If centering fails, silently ignore
                     pass
