@@ -495,6 +495,10 @@ class CatalogDockWidget(QDockWidget):
         code_tab = self._create_code_tab()
         self.tab_widget.addTab(code_tab, "Code")
 
+        # Conversion tab
+        conversion_tab = self._create_conversion_tab()
+        self.tab_widget.addTab(conversion_tab, "Conversion")
+
         # Inspector tab
         inspector_tab = self._create_inspector_tab()
         self.tab_widget.addTab(inspector_tab, "Inspector")
@@ -984,6 +988,201 @@ class CatalogDockWidget(QDockWidget):
         layout.addLayout(btn_layout)
 
         return widget
+
+    def _create_conversion_tab(self):
+        """Create the conversion tab for converting JavaScript to Python."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        # Instructions
+        instructions = QLabel(
+            "Convert Earth Engine JavaScript code to Python.\n"
+            "Paste JavaScript code, click Convert, then Run Code to execute."
+        )
+        instructions.setWordWrap(True)
+        instructions.setStyleSheet("color: gray; font-size: 11px;")
+        layout.addWidget(instructions)
+
+        # Code input/output area
+        self.conversion_input = QPlainTextEdit()
+        self.conversion_input.setPlaceholderText(
+            "// Paste Earth Engine JavaScript code here\n"
+            "// Example:\n"
+            "var dem = ee.Image('USGS/SRTMGL1_003');\n"
+            "var vis = {min: 0, max: 4000, palette: ['green', 'yellow', 'brown']};\n"
+            "Map.addLayer(dem, vis, 'DEM');"
+        )
+        self.conversion_input.setFont(QFont("Monospace", 10))
+        layout.addWidget(self.conversion_input)
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+
+        convert_btn = QPushButton("Convert to Python")
+        convert_btn.clicked.connect(self._convert_js_to_py)
+        btn_layout.addWidget(convert_btn)
+
+        run_btn = QPushButton("▶ Run Code")
+        run_btn.clicked.connect(self._run_conversion_code)
+        btn_layout.addWidget(run_btn)
+
+        clear_btn = QPushButton("Clear")
+        clear_btn.clicked.connect(lambda: self.conversion_input.clear())
+        btn_layout.addWidget(clear_btn)
+
+        layout.addLayout(btn_layout)
+
+        return widget
+
+    def _convert_js_to_py(self):
+        """Convert JavaScript code to Python using geemap's conversion function."""
+        js_code = self.conversion_input.toPlainText().strip()
+        if not js_code:
+            QMessageBox.warning(self, "Warning", "Please enter JavaScript code to convert.")
+            return
+
+        try:
+            from geemap.conversion import js_snippet_to_py
+
+            # Convert JavaScript to Python
+            py_lines = js_snippet_to_py(
+                js_code,
+                add_new_cell=False,
+                import_ee=True,
+                import_geemap=True,
+                show_map=False,
+                Map="m",
+            )
+
+            if py_lines:
+                py_code = "".join(py_lines)
+                # Convert camelCase methods to snake_case
+                py_code = self._camel_to_snake_methods(py_code)
+                self.conversion_input.setPlainText(py_code)
+                self._show_success("JavaScript converted to Python!")
+            else:
+                QMessageBox.warning(
+                    self, "Warning", "Conversion returned empty result."
+                )
+        except ImportError:
+            QMessageBox.critical(
+                self,
+                "Error",
+                "geemap is not installed or conversion module not available.\n"
+                "Please install geemap: pip install geemap",
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Conversion Error", f"Failed to convert: {str(e)}")
+
+    def _camel_to_snake_methods(self, code: str) -> str:
+        """Convert common geemap camelCase methods to snake_case.
+
+        Args:
+            code: Python code with camelCase method names.
+
+        Returns:
+            Code with snake_case method names.
+        """
+        # Map of camelCase to snake_case for common geemap/Map methods
+        method_replacements = {
+            ".addLayer(": ".add_layer(",
+            ".setCenter(": ".set_center(",
+            ".centerObject(": ".center_object(",
+            ".addBasemap(": ".add_basemap(",
+            ".setOptions(": ".set_options(",
+            ".zoomToObject(": ".zoom_to_object(",
+            ".setBounds(": ".set_bounds(",
+            ".getCenter(": ".get_center(",
+            ".getBounds(": ".get_bounds(",
+            ".getZoom(": ".get_zoom(",
+            ".setZoom(": ".set_zoom(",
+        }
+
+        for camel, snake in method_replacements.items():
+            code = code.replace(camel, snake)
+
+        return code
+
+    def _run_conversion_code(self):
+        """Execute the Python code from the conversion tab."""
+        code = self.conversion_input.toPlainText()
+        if not code.strip():
+            return
+
+        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
+
+        try:
+            import sys
+            import types
+
+            # Create a QGIS-compatible Map class
+            QGISMap = self._create_qgis_map_class()
+
+            # Create namespace for execution
+            namespace = {
+                "iface": self.iface,
+            }
+
+            # Import ee
+            try:
+                import ee
+
+                namespace["ee"] = ee
+            except ImportError:
+                pass
+
+            # Create a patched geemap module that uses our QGISMap
+            patched_geemap = types.ModuleType("geemap")
+            patched_geemap.Map = QGISMap
+
+            # Try to copy commonly used attributes from real geemap
+            try:
+                import geemap as real_geemap
+
+                for attr in ["ee_initialize", "basemaps", "coreutils", "__version__"]:
+                    if hasattr(real_geemap, attr):
+                        setattr(patched_geemap, attr, getattr(real_geemap, attr))
+            except ImportError:
+                pass
+
+            # Patch sys.modules to ensure our geemap is used for imports
+            original_geemap = sys.modules.get("geemap")
+            sys.modules["geemap"] = patched_geemap
+
+            # Also patch qgis_geemap if it exists
+            original_qgis_geemap = sys.modules.get("qgis_geemap.core.qgis_map")
+
+            # Add geemap to namespace
+            namespace["geemap"] = patched_geemap
+
+            # Pre-create a Map instance as 'm' for convenience
+            namespace["m"] = QGISMap()
+            namespace["Map"] = QGISMap
+
+            try:
+                # Execute the code
+                exec(code, namespace)
+                self._show_success("Code executed successfully!")
+            finally:
+                # Restore original modules
+                if original_geemap is not None:
+                    sys.modules["geemap"] = original_geemap
+                else:
+                    sys.modules.pop("geemap", None)
+
+                if original_qgis_geemap is not None:
+                    sys.modules["qgis_geemap.core.qgis_map"] = original_qgis_geemap
+
+        except Exception as e:
+            import traceback
+
+            error_msg = str(e)
+            tb = traceback.format_exc()
+            QMessageBox.critical(
+                self, "Execution Error", f"Error: {error_msg}\n\nDetails:\n{tb}"
+            )
+        finally:
+            QApplication.restoreOverrideCursor()
 
     def _create_inspector_tab(self):
         """Create the Inspector tab for examining Earth Engine data at clicked locations."""
