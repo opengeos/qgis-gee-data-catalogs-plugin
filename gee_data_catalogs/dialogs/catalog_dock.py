@@ -1975,7 +1975,7 @@ class CatalogDockWidget(QDockWidget):
                     ]
                     vis_parts.append(f"'palette': {palette_list}")
                 else:
-                    vis_parts.append(f"'palette': '{palette}'  # matplotlib colormap")
+                    vis_parts.append(f"'palette': '{palette}'")
 
             if vis_parts:
                 code_lines.append("vis_params = {" + ", ".join(vis_parts) + "}")
@@ -2069,7 +2069,7 @@ class CatalogDockWidget(QDockWidget):
                     ]
                     vis_parts.append(f"'palette': {palette_list}")
                 else:
-                    vis_parts.append(f"'palette': '{palette}'  # matplotlib colormap")
+                    vis_parts.append(f"'palette': '{palette}'")
 
             if vis_parts:
                 code_lines.append("vis_params = {" + ", ".join(vis_parts) + "}")
@@ -2089,18 +2089,9 @@ class CatalogDockWidget(QDockWidget):
 
         self._show_success("Code snippet copied to clipboard!")
 
-        # Also show in status with option to view
-        reply = QMessageBox.question(
-            self,
-            "Code Copied",
-            "Code snippet copied to clipboard!\n\nWould you like to paste it in the Code tab?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-
-        if reply == QMessageBox.Yes:
-            self.code_input.setPlainText(code)
-            self.tab_widget.setCurrentIndex(3)  # Switch to Code tab
+        # Paste code to Code tab and switch to it
+        self.code_input.setPlainText(code)
+        self.tab_widget.setCurrentIndex(3)  # Switch to Code tab
 
     def _run_code(self):
         """Execute the code in the console."""
