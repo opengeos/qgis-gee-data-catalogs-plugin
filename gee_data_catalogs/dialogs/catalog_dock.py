@@ -7,7 +7,7 @@ and loading Google Earth Engine datasets.
 
 from datetime import datetime, timedelta
 
-from qgis.PyQt.QtCore import Qt, QCoreApplication, QThread, pyqtSignal
+from qgis.PyQt.QtCore import Qt, QCoreApplication, QThread, pyqtSignal, QTimer
 from qgis.PyQt.QtWidgets import (
     QDockWidget,
     QWidget,
@@ -38,6 +38,7 @@ from qgis.PyQt.QtWidgets import (
     QPlainTextEdit,
     QRadioButton,
     QButtonGroup,
+    QSlider,
 )
 from qgis.PyQt.QtGui import QFont, QCursor
 from qgis.core import QgsProject, QgsRectangle, QgsMessageLog, Qgis
@@ -270,6 +271,203 @@ class ImageListLoaderThread(QThread):
             self.error.emit(str(e))
 
 
+class TimeSeriesLoaderThread(QThread):
+    """Thread for creating time series from ImageCollection."""
+
+    finished = pyqtSignal(list, list)  # (images_list, labels_list)
+    error = pyqtSignal(str)
+    progress = pyqtSignal(str)
+
+    def __init__(
+        self,
+        asset_id: str,
+        start_date: str,
+        end_date: str,
+        frequency: str = "month",
+        reducer: str = "median",
+        bands: list = None,
+        region: list = None,  # [west, south, east, north]
+        cloud_cover: int = None,
+        cloud_property: str = "CLOUDY_PIXEL_PERCENTAGE",
+        property_filters: list = None,  # [(prop, op, value), ...]
+    ):
+        super().__init__()
+        self.asset_id = asset_id
+        self.start_date = start_date
+        self.end_date = end_date
+        self.frequency = frequency
+        self.reducer = reducer
+        self.bands = bands
+        self.region = region
+        self.cloud_cover = cloud_cover
+        self.cloud_property = cloud_property
+        self.property_filters = property_filters or []
+
+    def _apply_property_filters(self, collection):
+        """Apply property filters to collection."""
+        import ee
+
+        for prop_name, op, value in self.property_filters:
+            if op == "==":
+                collection = collection.filter(ee.Filter.eq(prop_name, value))
+            elif op == "!=":
+                collection = collection.filter(ee.Filter.neq(prop_name, value))
+            elif op == ">":
+                collection = collection.filter(ee.Filter.gt(prop_name, value))
+            elif op == ">=":
+                collection = collection.filter(ee.Filter.gte(prop_name, value))
+            elif op == "<":
+                collection = collection.filter(ee.Filter.lt(prop_name, value))
+            elif op == "<=":
+                collection = collection.filter(ee.Filter.lte(prop_name, value))
+        return collection
+
+    def run(self):
+        try:
+            import ee
+            from datetime import datetime
+            from dateutil.relativedelta import relativedelta
+
+            self.progress.emit(
+                f"Creating time series with {self.frequency} frequency..."
+            )
+
+            # Load the collection
+            collection = ee.ImageCollection(self.asset_id)
+
+            # Apply date filter
+            collection = collection.filterDate(self.start_date, self.end_date)
+
+            # Apply region filter if provided
+            region = None
+            if self.region:
+                region = ee.Geometry.Rectangle(self.region)
+                collection = collection.filterBounds(region)
+
+            # Apply cloud filter if provided
+            if self.cloud_cover is not None:
+                collection = collection.filter(
+                    ee.Filter.lt(self.cloud_property, self.cloud_cover)
+                )
+
+            # Apply property filters
+            if self.property_filters:
+                collection = self._apply_property_filters(collection)
+
+            # Select bands if specified
+            if self.bands:
+                collection = collection.select(self.bands)
+
+            # Get frequency settings
+            freq_dict = {
+                "day": ("YYYY-MM-dd", "day", 1),
+                "week": ("YYYY-MM-dd", "week", 1),
+                "month": ("YYYY-MM", "month", 1),
+                "quarter": ("YYYY-MM", "month", 3),
+                "year": ("YYYY", "year", 1),
+            }
+
+            date_format, unit, step = freq_dict.get(
+                self.frequency, ("YYYY-MM", "month", 1)
+            )
+
+            # Generate date sequence
+            start_dt = datetime.strptime(self.start_date, "%Y-%m-%d")
+            end_dt = datetime.strptime(self.end_date, "%Y-%m-%d")
+
+            dates = []
+            current = start_dt
+            while current < end_dt:
+                dates.append(current.strftime("%Y-%m-%d"))
+                if unit == "day":
+                    current += relativedelta(days=step)
+                elif unit == "week":
+                    current += relativedelta(weeks=step)
+                elif unit == "month":
+                    current += relativedelta(months=step)
+                elif unit == "year":
+                    current += relativedelta(years=step)
+
+            if not dates:
+                self.error.emit("No dates in the specified range")
+                return
+
+            self.progress.emit(f"Processing {len(dates)} time steps...")
+
+            # Get reducer function
+            reducer_func = getattr(ee.Reducer, self.reducer)()
+
+            # Create composite for each time step
+            images_data = []
+            labels = []
+
+            for i, date_str in enumerate(dates):
+                start = ee.Date(date_str)
+                if unit == "day":
+                    end = start.advance(step, "day")
+                elif unit == "week":
+                    end = start.advance(step * 7, "day")
+                elif unit == "month":
+                    end = start.advance(step, "month")
+                elif unit == "year":
+                    end = start.advance(step, "year")
+
+                # Filter collection for this time period
+                sub_col = collection.filterDate(start, end)
+
+                # Apply region clipping if specified
+                if region:
+                    sub_col = sub_col.filterBounds(region)
+
+                # Reduce to single image
+                image = sub_col.reduce(reducer_func)
+
+                # Check if we have any images
+                count = sub_col.size().getInfo()
+                if count > 0:
+                    # Format label based on frequency
+                    if self.frequency == "day":
+                        label = date_str
+                    elif self.frequency == "week":
+                        label = f"Week of {date_str}"
+                    elif self.frequency == "month":
+                        label = datetime.strptime(date_str, "%Y-%m-%d").strftime(
+                            "%Y-%m"
+                        )
+                    elif self.frequency == "quarter":
+                        dt = datetime.strptime(date_str, "%Y-%m-%d")
+                        quarter = (dt.month - 1) // 3 + 1
+                        label = f"{dt.year} Q{quarter}"
+                    elif self.frequency == "year":
+                        label = datetime.strptime(date_str, "%Y-%m-%d").strftime("%Y")
+                    else:
+                        label = date_str
+
+                    images_data.append(
+                        {
+                            "start_date": date_str,
+                            "end_date": end.format("YYYY-MM-dd").getInfo(),
+                            "count": count,
+                            "label": label,
+                        }
+                    )
+                    labels.append(label)
+
+                self.progress.emit(f"Processed {i+1}/{len(dates)} time steps...")
+
+            if not images_data:
+                self.error.emit("No images found in the specified date range")
+                return
+
+            self.progress.emit(f"Created time series with {len(images_data)} images")
+            self.finished.emit(images_data, labels)
+
+        except Exception as e:
+            import traceback
+
+            self.error.emit(f"{str(e)}\n{traceback.format_exc()}")
+
+
 class InspectorWorker(QThread):
     """Thread for inspecting Earth Engine data at a point."""
 
@@ -442,6 +640,23 @@ class CatalogDockWidget(QDockWidget):
         self._inspector_active = False
         self._js_code_cache = None  # Cache for f.json JavaScript code snippets
 
+        # Time series related attributes
+        self._timeseries_thread = None
+        self._timeseries_images = []
+        self._timeseries_labels = []
+        self._timeseries_collection = None
+        self._timeseries_vis_params = {}
+        self._timeseries_timer = None
+        self._timeseries_playing = False
+        self._timeseries_current_index = 0
+
+        # Drawn bounding box storage
+        self._ts_drawn_bbox = None  # [west, south, east, north]
+        self._load_drawn_bbox = None
+        self._bbox_drawing_mode = None  # 'ts' or 'load'
+        self._bbox_rubber_band = None
+        self._bbox_map_tool = None
+
         self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         self.setMinimumWidth(380)
 
@@ -487,6 +702,10 @@ class CatalogDockWidget(QDockWidget):
         # Search tab
         search_tab = self._create_search_tab()
         self.tab_widget.addTab(search_tab, "Search")
+
+        # Time Series tab
+        timeseries_tab = self._create_timeseries_tab()
+        self.tab_widget.addTab(timeseries_tab, "Time Series")
 
         # Load tab
         load_tab = self._create_load_tab()
@@ -560,20 +779,29 @@ class CatalogDockWidget(QDockWidget):
             )
             return None
 
-    def _get_cloud_property(self, asset_id: str) -> str:
+    def _get_cloud_property(self, asset_id: str, custom_property: str = None) -> str:
         """Determine the correct cloud cover property based on the asset ID.
 
         Args:
             asset_id: The Earth Engine asset ID.
+            custom_property: Optional custom property name provided by user.
 
         Returns:
             The cloud cover property name for the dataset.
         """
+        # Use custom property if provided
+        if custom_property and custom_property.strip():
+            return custom_property.strip()
+
         asset_upper = asset_id.upper()
 
         # Landsat collections use CLOUD_COVER
         if "LANDSAT" in asset_upper:
             return "CLOUD_COVER"
+
+        # NASA HLS uses CLOUD_COVERAGE
+        if "NASA/HLS" in asset_upper or "HLS" in asset_upper:
+            return "CLOUD_COVERAGE"
 
         # MODIS uses different properties but typically doesn't have per-scene cloud
         if "MODIS" in asset_upper:
@@ -585,6 +813,271 @@ class CatalogDockWidget(QDockWidget):
 
         # Default to CLOUDY_PIXEL_PERCENTAGE (most common for optical imagery)
         return "CLOUDY_PIXEL_PERCENTAGE"
+
+    def _parse_property_filters(self, filter_text: str) -> list:
+        """Parse property filter text into a list of filter specifications.
+
+        Args:
+            filter_text: Multi-line text with filters like "PROPERTY > value"
+
+        Returns:
+            List of tuples: [(property_name, operator, value), ...]
+        """
+        import re
+
+        filters = []
+        if not filter_text or not filter_text.strip():
+            return filters
+
+        # Supported operators
+        operators = ["==", "!=", ">=", "<=", ">", "<"]
+
+        for line in filter_text.strip().split("\n"):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            # Try to match pattern: property operator value
+            for op in operators:
+                if op in line:
+                    parts = line.split(op, 1)
+                    if len(parts) == 2:
+                        prop_name = parts[0].strip()
+                        value_str = parts[1].strip()
+
+                        # Try to convert value to appropriate type
+                        try:
+                            # Try as float first
+                            value = float(value_str)
+                            if value.is_integer():
+                                value = int(value)
+                        except ValueError:
+                            # Keep as string (strip quotes if present)
+                            value = value_str.strip("\"'")
+
+                        filters.append((prop_name, op, value))
+                        break
+
+        return filters
+
+    def _apply_property_filters(self, collection, filters: list):
+        """Apply property filters to an ImageCollection.
+
+        Args:
+            collection: ee.ImageCollection
+            filters: List of (property_name, operator, value) tuples
+
+        Returns:
+            Filtered collection
+        """
+        if not filters:
+            return collection
+
+        for prop_name, op, value in filters:
+            if op == "==":
+                collection = collection.filter(ee.Filter.eq(prop_name, value))
+            elif op == "!=":
+                collection = collection.filter(ee.Filter.neq(prop_name, value))
+            elif op == ">":
+                collection = collection.filter(ee.Filter.gt(prop_name, value))
+            elif op == ">=":
+                collection = collection.filter(ee.Filter.gte(prop_name, value))
+            elif op == "<":
+                collection = collection.filter(ee.Filter.lt(prop_name, value))
+            elif op == "<=":
+                collection = collection.filter(ee.Filter.lte(prop_name, value))
+
+        return collection
+
+    def _start_draw_bbox_ts(self):
+        """Start drawing bounding box for Time Series tab."""
+        self._bbox_drawing_mode = "ts"
+        self._start_bbox_drawing()
+
+    def _start_draw_bbox_load(self):
+        """Start drawing bounding box for Load tab."""
+        self._bbox_drawing_mode = "load"
+        self._start_bbox_drawing()
+
+    def _start_bbox_drawing(self):
+        """Start the bounding box drawing tool."""
+        from qgis.gui import QgsMapToolEmitPoint, QgsRubberBand
+        from qgis.core import QgsWkbTypes, QgsPointXY, QgsRectangle
+        from qgis.PyQt.QtGui import QColor
+        from qgis.PyQt.QtCore import Qt
+
+        canvas = self.iface.mapCanvas()
+        dock_widget = self
+
+        # Create a custom rectangle drawing tool with red outline
+        class BBoxDrawTool(QgsMapToolEmitPoint):
+            def __init__(self, canvas, callback):
+                super().__init__(canvas)
+                self.canvas = canvas
+                self.callback = callback
+                self.rubberBand = None
+                self.startPoint = None
+                self.endPoint = None
+                self.isDrawing = False
+
+            def canvasPressEvent(self, event):
+                self.startPoint = self.toMapCoordinates(event.pos())
+                self.endPoint = self.startPoint
+                self.isDrawing = True
+                self._showRubberBand()
+
+            def canvasMoveEvent(self, event):
+                if not self.isDrawing:
+                    return
+                self.endPoint = self.toMapCoordinates(event.pos())
+                self._showRubberBand()
+
+            def canvasReleaseEvent(self, event):
+                self.isDrawing = False
+                if self.startPoint and self.endPoint:
+                    rect = QgsRectangle(self.startPoint, self.endPoint)
+                    if rect.width() > 0 and rect.height() > 0:
+                        self.callback(rect)
+                self._hideRubberBand()
+
+            def _showRubberBand(self):
+                if self.rubberBand is None:
+                    self.rubberBand = QgsRubberBand(
+                        self.canvas, QgsWkbTypes.PolygonGeometry
+                    )
+                    self.rubberBand.setColor(QColor(255, 0, 0, 50))  # Light red fill
+                    self.rubberBand.setStrokeColor(
+                        QColor(255, 0, 0, 255)
+                    )  # Red outline
+                    self.rubberBand.setWidth(2)
+
+                self.rubberBand.reset(QgsWkbTypes.PolygonGeometry)
+                if self.startPoint and self.endPoint:
+                    point1 = QgsPointXY(self.startPoint.x(), self.startPoint.y())
+                    point2 = QgsPointXY(self.endPoint.x(), self.startPoint.y())
+                    point3 = QgsPointXY(self.endPoint.x(), self.endPoint.y())
+                    point4 = QgsPointXY(self.startPoint.x(), self.endPoint.y())
+                    self.rubberBand.addPoint(point1, False)
+                    self.rubberBand.addPoint(point2, False)
+                    self.rubberBand.addPoint(point3, False)
+                    self.rubberBand.addPoint(point4, True)
+                    self.rubberBand.show()
+
+            def _hideRubberBand(self):
+                if self.rubberBand:
+                    self.rubberBand.hide()
+                    self.canvas.scene().removeItem(self.rubberBand)
+                    self.rubberBand = None
+
+            def deactivate(self):
+                self._hideRubberBand()
+                super().deactivate()
+
+        self._bbox_map_tool = BBoxDrawTool(canvas, self._on_bbox_drawn)
+        canvas.setMapTool(self._bbox_map_tool)
+
+        # Update status
+        if self._bbox_drawing_mode == "ts":
+            self.ts_bbox_label.setText("Draw a rectangle on the map...")
+            self.ts_bbox_label.setStyleSheet("color: #ffaa00; font-size: 9px;")
+        else:
+            self.load_bbox_label.setText("Draw a rectangle on the map...")
+            self.load_bbox_label.setStyleSheet("color: #ffaa00; font-size: 9px;")
+
+    def _on_bbox_drawn(self, extent):
+        """Handle drawn bounding box extent."""
+        from qgis.core import (
+            QgsCoordinateReferenceSystem,
+            QgsCoordinateTransform,
+            QgsProject,
+            QgsPointXY,
+        )
+
+        try:
+            # Transform to WGS84
+            map_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
+            wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
+
+            if map_crs.authid() != "EPSG:4326":
+                transform = QgsCoordinateTransform(
+                    map_crs, wgs84, QgsProject.instance()
+                )
+                sw_point = transform.transform(
+                    QgsPointXY(extent.xMinimum(), extent.yMinimum())
+                )
+                ne_point = transform.transform(
+                    QgsPointXY(extent.xMaximum(), extent.yMaximum())
+                )
+                bbox = [sw_point.x(), sw_point.y(), ne_point.x(), ne_point.y()]
+            else:
+                bbox = [
+                    extent.xMinimum(),
+                    extent.yMinimum(),
+                    extent.xMaximum(),
+                    extent.yMaximum(),
+                ]
+
+            # Store the bbox
+            if self._bbox_drawing_mode == "ts":
+                self._ts_drawn_bbox = bbox
+                self.ts_bbox_label.setText(
+                    f"Bounds: [{bbox[0]:.4f}, {bbox[1]:.4f}, {bbox[2]:.4f}, {bbox[3]:.4f}]"
+                )
+                self.ts_bbox_label.setStyleSheet("color: #00cc66; font-size: 9px;")
+                self.ts_clear_bbox_btn.setEnabled(True)
+            else:
+                self._load_drawn_bbox = bbox
+                self.load_bbox_label.setText(
+                    f"Bounds: [{bbox[0]:.4f}, {bbox[1]:.4f}, {bbox[2]:.4f}, {bbox[3]:.4f}]"
+                )
+                self.load_bbox_label.setStyleSheet("color: #00cc66; font-size: 9px;")
+                self.load_clear_bbox_btn.setEnabled(True)
+
+            # Restore previous map tool
+            self.iface.mapCanvas().unsetMapTool(self._bbox_map_tool)
+
+        except Exception as e:
+            QgsMessageLog.logMessage(
+                f"Error drawing bounding box: {e}",
+                "GEE Data Catalogs",
+                Qgis.Warning,
+            )
+
+    def _clear_drawn_bbox_ts(self):
+        """Clear the drawn bounding box for Time Series tab."""
+        self._ts_drawn_bbox = None
+        self.ts_bbox_label.setText("")
+        self.ts_clear_bbox_btn.setEnabled(False)
+
+    def _clear_drawn_bbox_load(self):
+        """Clear the drawn bounding box for Load tab."""
+        self._load_drawn_bbox = None
+        self.load_bbox_label.setText("")
+        self.load_clear_bbox_btn.setEnabled(False)
+
+    def _get_spatial_filter_ts(self):
+        """Get the spatial filter for Time Series tab.
+
+        Returns:
+            List [west, south, east, north] or None
+        """
+        if self.ts_spatial_extent.isChecked():
+            return self._get_map_extent_wgs84()
+        elif self.ts_spatial_draw.isChecked() and self._ts_drawn_bbox:
+            return self._ts_drawn_bbox
+        return None
+
+    def _get_spatial_filter_load(self):
+        """Get the spatial filter for Load tab.
+
+        Returns:
+            List [west, south, east, north] or None
+        """
+        if self.load_spatial_extent.isChecked():
+            return self._get_map_extent_wgs84()
+        elif self.load_spatial_draw.isChecked() and self._load_drawn_bbox:
+            return self._load_drawn_bbox
+        return None
 
     def _create_browse_tab(self):
         """Create the browse tab with category tree."""
@@ -640,6 +1133,18 @@ class CatalogDockWidget(QDockWidget):
         btn_layout.addWidget(self.configure_btn)
 
         info_layout.addLayout(btn_layout)
+
+        # Second row of buttons for Time Series
+        btn_layout2 = QHBoxLayout()
+        self.timeseries_btn = QPushButton("📈 Time Series")
+        self.timeseries_btn.setEnabled(False)
+        self.timeseries_btn.setToolTip(
+            "Configure and create time series from this dataset"
+        )
+        self.timeseries_btn.clicked.connect(self._configure_timeseries)
+        btn_layout2.addWidget(self.timeseries_btn)
+        info_layout.addLayout(btn_layout2)
+
         splitter.addWidget(info_group)
 
         splitter.setSizes([300, 200])
@@ -726,11 +1231,301 @@ class CatalogDockWidget(QDockWidget):
         search_btn_layout.addWidget(self.search_configure_btn)
 
         search_info_layout.addLayout(search_btn_layout)
+
+        # Second row of buttons for Time Series
+        search_btn_layout2 = QHBoxLayout()
+        self.search_timeseries_btn = QPushButton("📈 Time Series")
+        self.search_timeseries_btn.setEnabled(False)
+        self.search_timeseries_btn.setToolTip(
+            "Configure and create time series from this dataset"
+        )
+        self.search_timeseries_btn.clicked.connect(self._configure_search_timeseries)
+        search_btn_layout2.addWidget(self.search_timeseries_btn)
+        search_info_layout.addLayout(search_btn_layout2)
+
         splitter.addWidget(search_info_group)
 
         splitter.setSizes([250, 250])
 
         return widget
+
+    def _create_timeseries_tab(self):
+        """Create the Time Series tab for creating and visualizing time series."""
+        widget = QWidget()
+
+        # Scroll area for many options
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+
+        scroll_widget = QWidget()
+        layout = QVBoxLayout(scroll_widget)
+
+        # Dataset ID input group
+        id_group = QGroupBox("Dataset")
+        id_layout = QFormLayout(id_group)
+
+        self.ts_dataset_id_input = QLineEdit()
+        self.ts_dataset_id_input.setPlaceholderText("e.g., COPERNICUS/S2_SR_HARMONIZED")
+        id_layout.addRow("Asset ID:", self.ts_dataset_id_input)
+
+        self.ts_layer_name_input = QLineEdit()
+        self.ts_layer_name_input.setPlaceholderText("Time series layer name")
+        self.ts_layer_name_input.setText("Time Series")
+        id_layout.addRow("Layer Name:", self.ts_layer_name_input)
+
+        layout.addWidget(id_group)
+
+        # Date range group
+        date_group = QGroupBox("Date Range")
+        date_layout = QFormLayout(date_group)
+
+        today = datetime.now()
+        one_year_ago = today - timedelta(days=365)
+
+        self.ts_start_date = QDateEdit()
+        self.ts_start_date.setDate(one_year_ago)
+        self.ts_start_date.setCalendarPopup(True)
+        self.ts_start_date.setDisplayFormat("yyyy-MM-dd")
+        date_layout.addRow("Start Date:", self.ts_start_date)
+
+        self.ts_end_date = QDateEdit()
+        self.ts_end_date.setDate(today)
+        self.ts_end_date.setCalendarPopup(True)
+        self.ts_end_date.setDisplayFormat("yyyy-MM-dd")
+        date_layout.addRow("End Date:", self.ts_end_date)
+
+        layout.addWidget(date_group)
+
+        # Filters group
+        filters_group = QGroupBox("Filters")
+        filters_layout = QFormLayout(filters_group)
+
+        # Cloud cover
+        cloud_layout = QHBoxLayout()
+        self.ts_cloud_cover_spin = QSpinBox()
+        self.ts_cloud_cover_spin.setRange(0, 100)
+        self.ts_cloud_cover_spin.setValue(20)
+        self.ts_cloud_cover_spin.setSuffix("%")
+        cloud_layout.addWidget(self.ts_cloud_cover_spin)
+
+        self.ts_cloud_property_input = QLineEdit()
+        self.ts_cloud_property_input.setPlaceholderText("Property name (auto-detect)")
+        self.ts_cloud_property_input.setToolTip(
+            "Cloud cover property name. Leave empty for auto-detection.\n"
+            "Examples: CLOUDY_PIXEL_PERCENTAGE (Sentinel), CLOUD_COVER (Landsat),\n"
+            "CLOUD_COVERAGE (HLS)"
+        )
+        cloud_layout.addWidget(self.ts_cloud_property_input)
+        filters_layout.addRow("Max Cloud Cover:", cloud_layout)
+
+        self.ts_use_cloud_filter = QCheckBox("Apply cloud filter")
+        self.ts_use_cloud_filter.setChecked(False)
+        filters_layout.addRow("", self.ts_use_cloud_filter)
+
+        # Spatial filter options
+        spatial_group = QGroupBox("Spatial Filter")
+        spatial_layout = QVBoxLayout(spatial_group)
+
+        self.ts_spatial_none = QRadioButton("No spatial filter")
+        self.ts_spatial_none.setChecked(True)
+        spatial_layout.addWidget(self.ts_spatial_none)
+
+        self.ts_spatial_extent = QRadioButton("Use current map extent")
+        spatial_layout.addWidget(self.ts_spatial_extent)
+
+        draw_bbox_layout = QHBoxLayout()
+        self.ts_spatial_draw = QRadioButton("Draw bounding box")
+        draw_bbox_layout.addWidget(self.ts_spatial_draw)
+        self.ts_draw_bbox_btn = QPushButton("□ Draw")
+        self.ts_draw_bbox_btn.setMaximumWidth(70)
+        self.ts_draw_bbox_btn.setEnabled(False)
+        self.ts_draw_bbox_btn.clicked.connect(self._start_draw_bbox_ts)
+        draw_bbox_layout.addWidget(self.ts_draw_bbox_btn)
+        self.ts_clear_bbox_btn = QPushButton("Clear")
+        self.ts_clear_bbox_btn.setMaximumWidth(50)
+        self.ts_clear_bbox_btn.setEnabled(False)
+        self.ts_clear_bbox_btn.clicked.connect(self._clear_drawn_bbox_ts)
+        draw_bbox_layout.addWidget(self.ts_clear_bbox_btn)
+        spatial_layout.addLayout(draw_bbox_layout)
+
+        self.ts_bbox_label = QLabel("")
+        self.ts_bbox_label.setStyleSheet("color: #aaaaaa; font-size: 9px;")
+        self.ts_bbox_label.setWordWrap(True)
+        spatial_layout.addWidget(self.ts_bbox_label)
+
+        # Connect radio buttons to enable/disable draw button
+        self.ts_spatial_draw.toggled.connect(
+            lambda checked: self.ts_draw_bbox_btn.setEnabled(checked)
+        )
+
+        filters_layout.addRow(spatial_group)
+
+        layout.addWidget(filters_group)
+
+        # Property filters group
+        prop_filter_group = QGroupBox("Property Filters (Optional)")
+        prop_filter_layout = QVBoxLayout(prop_filter_group)
+
+        prop_filter_help = QLabel(
+            "Add custom property filters. One per line in format:\n"
+            "property_name operator value (e.g., SUN_ELEVATION > 30)"
+        )
+        prop_filter_help.setStyleSheet("color: gray; font-size: 10px;")
+        prop_filter_help.setWordWrap(True)
+        prop_filter_layout.addWidget(prop_filter_help)
+
+        self.ts_property_filters = QPlainTextEdit()
+        self.ts_property_filters.setPlaceholderText(
+            "SUN_ELEVATION > 30\nSUN_AZIMUTH < 180\nMGRS_TILE == 10SGD"
+        )
+        self.ts_property_filters.setMaximumHeight(80)
+        prop_filter_layout.addWidget(self.ts_property_filters)
+
+        # Operator reference
+        operator_label = QLabel(
+            "Operators: == (equals), != (not equals), < > <= >= (comparison)"
+        )
+        operator_label.setStyleSheet("color: gray; font-size: 9px;")
+        prop_filter_layout.addWidget(operator_label)
+
+        layout.addWidget(prop_filter_group)
+
+        # Time series options group
+        ts_options_group = QGroupBox("Time Series Options")
+        ts_options_layout = QFormLayout(ts_options_group)
+
+        # Temporal frequency
+        self.ts_frequency_combo = QComboBox()
+        self.ts_frequency_combo.addItems(["day", "week", "month", "quarter", "year"])
+        self.ts_frequency_combo.setCurrentText("month")
+        ts_options_layout.addRow("Frequency:", self.ts_frequency_combo)
+
+        # Reducer method
+        self.ts_reducer_combo = QComboBox()
+        self.ts_reducer_combo.addItems(["median", "mean", "min", "max", "first", "sum"])
+        self.ts_reducer_combo.setCurrentText("median")
+        ts_options_layout.addRow("Reducer:", self.ts_reducer_combo)
+
+        layout.addWidget(ts_options_group)
+
+        # Visualization params group
+        vis_group = QGroupBox("Visualization Parameters")
+        vis_layout = QFormLayout(vis_group)
+
+        self.ts_bands_input = QLineEdit()
+        self.ts_bands_input.setPlaceholderText("e.g., B4,B3,B2 for RGB")
+        vis_layout.addRow("Bands:", self.ts_bands_input)
+
+        self.ts_vis_min_input = QLineEdit()
+        self.ts_vis_min_input.setPlaceholderText("e.g., 0")
+        vis_layout.addRow("Min:", self.ts_vis_min_input)
+
+        self.ts_vis_max_input = QLineEdit()
+        self.ts_vis_max_input.setPlaceholderText("e.g., 3000")
+        vis_layout.addRow("Max:", self.ts_vis_max_input)
+
+        self.ts_palette_input = QLineEdit()
+        self.ts_palette_input.setPlaceholderText("e.g., blue,green,red or viridis")
+        vis_layout.addRow("Palette:", self.ts_palette_input)
+
+        layout.addWidget(vis_group)
+
+        # Create time series button
+        create_btn_layout = QHBoxLayout()
+        self.ts_create_btn = QPushButton("▶ Create Time Series")
+        self.ts_create_btn.clicked.connect(self._create_timeseries)
+        create_btn_layout.addWidget(self.ts_create_btn)
+
+        self.ts_preview_btn = QPushButton("Preview Info")
+        self.ts_preview_btn.clicked.connect(self._preview_timeseries)
+        create_btn_layout.addWidget(self.ts_preview_btn)
+
+        layout.addLayout(create_btn_layout)
+
+        # Time slider group
+        slider_group = QGroupBox("Time Slider")
+        slider_layout = QVBoxLayout(slider_group)
+
+        # Current time label
+        self.ts_current_label = QLabel("No time series loaded")
+        self.ts_current_label.setStyleSheet("font-weight: bold; font-size: 12px;")
+        self.ts_current_label.setAlignment(Qt.AlignCenter)
+        slider_layout.addWidget(self.ts_current_label)
+
+        # Time slider
+        self.ts_time_slider = QSlider(Qt.Horizontal)
+        self.ts_time_slider.setMinimum(0)
+        self.ts_time_slider.setMaximum(0)
+        self.ts_time_slider.setValue(0)
+        self.ts_time_slider.setEnabled(False)
+        self.ts_time_slider.valueChanged.connect(self._on_timeslider_changed)
+        slider_layout.addWidget(self.ts_time_slider)
+
+        # Slider control buttons
+        slider_btn_layout = QHBoxLayout()
+
+        self.ts_prev_btn = QPushButton("◀ Prev")
+        self.ts_prev_btn.setEnabled(False)
+        self.ts_prev_btn.clicked.connect(self._timeseries_prev)
+        slider_btn_layout.addWidget(self.ts_prev_btn)
+
+        self.ts_play_btn = QPushButton("▶ Play")
+        self.ts_play_btn.setEnabled(False)
+        self.ts_play_btn.clicked.connect(self._timeseries_toggle_play)
+        slider_btn_layout.addWidget(self.ts_play_btn)
+
+        self.ts_next_btn = QPushButton("Next ▶")
+        self.ts_next_btn.setEnabled(False)
+        self.ts_next_btn.clicked.connect(self._timeseries_next)
+        slider_btn_layout.addWidget(self.ts_next_btn)
+
+        slider_layout.addLayout(slider_btn_layout)
+
+        # Animation speed control
+        speed_layout = QHBoxLayout()
+        speed_layout.addWidget(QLabel("Speed:"))
+        self.ts_speed_spin = QSpinBox()
+        self.ts_speed_spin.setRange(500, 5000)
+        self.ts_speed_spin.setValue(1000)
+        self.ts_speed_spin.setSuffix(" ms")
+        self.ts_speed_spin.setSingleStep(100)
+        self.ts_speed_spin.valueChanged.connect(self._update_timeseries_timer_interval)
+        speed_layout.addWidget(self.ts_speed_spin)
+
+        self.ts_loop_check = QCheckBox("Loop")
+        self.ts_loop_check.setChecked(True)
+        speed_layout.addWidget(self.ts_loop_check)
+
+        slider_layout.addLayout(speed_layout)
+
+        layout.addWidget(slider_group)
+
+        # Status/info area
+        self.ts_info_label = QLabel("")
+        self.ts_info_label.setWordWrap(True)
+        self.ts_info_label.setStyleSheet("color: gray; font-size: 10px;")
+        layout.addWidget(self.ts_info_label)
+
+        # Copy code button
+        copy_btn_layout = QHBoxLayout()
+        self.ts_copy_code_btn = QPushButton("📋 Copy Code Snippet")
+        self.ts_copy_code_btn.clicked.connect(self._copy_timeseries_code)
+        self.ts_copy_code_btn.setToolTip(
+            "Copy Python code for creating this time series"
+        )
+        copy_btn_layout.addWidget(self.ts_copy_code_btn)
+        layout.addLayout(copy_btn_layout)
+
+        layout.addStretch()
+
+        scroll.setWidget(scroll_widget)
+
+        # Return scroll area wrapped in widget
+        container = QWidget()
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.addWidget(scroll)
+        return container
 
     def _create_load_tab(self):
         """Create the load/filter tab."""
@@ -781,23 +1576,95 @@ class CatalogDockWidget(QDockWidget):
         self.use_date_filter.setChecked(False)
         filters_layout.addRow("", self.use_date_filter)
 
-        # Cloud cover
+        # Cloud cover with property name input
+        cloud_layout = QHBoxLayout()
         self.cloud_cover_spin = QSpinBox()
         self.cloud_cover_spin.setRange(0, 100)
         self.cloud_cover_spin.setValue(20)
         self.cloud_cover_spin.setSuffix("%")
-        filters_layout.addRow("Max Cloud Cover:", self.cloud_cover_spin)
+        cloud_layout.addWidget(self.cloud_cover_spin)
+
+        self.cloud_property_input = QLineEdit()
+        self.cloud_property_input.setPlaceholderText("Property name (auto-detect)")
+        self.cloud_property_input.setToolTip(
+            "Cloud cover property name. Leave empty for auto-detection.\n"
+            "Examples: CLOUDY_PIXEL_PERCENTAGE (Sentinel), CLOUD_COVER (Landsat),\n"
+            "CLOUD_COVERAGE (HLS)"
+        )
+        cloud_layout.addWidget(self.cloud_property_input)
+        filters_layout.addRow("Max Cloud Cover:", cloud_layout)
 
         self.use_cloud_filter = QCheckBox("Apply cloud filter")
         self.use_cloud_filter.setChecked(False)
         filters_layout.addRow("", self.use_cloud_filter)
 
-        # Bounding box
-        self.use_bbox_filter = QCheckBox("Filter by current map extent")
-        self.use_bbox_filter.setChecked(False)
-        filters_layout.addRow("Spatial Filter:", self.use_bbox_filter)
+        # Spatial filter options
+        spatial_group = QGroupBox("Spatial Filter")
+        spatial_layout = QVBoxLayout(spatial_group)
+
+        self.load_spatial_none = QRadioButton("No spatial filter")
+        self.load_spatial_none.setChecked(True)
+        spatial_layout.addWidget(self.load_spatial_none)
+
+        self.load_spatial_extent = QRadioButton("Use current map extent")
+        spatial_layout.addWidget(self.load_spatial_extent)
+
+        draw_bbox_layout = QHBoxLayout()
+        self.load_spatial_draw = QRadioButton("Draw bounding box")
+        draw_bbox_layout.addWidget(self.load_spatial_draw)
+        self.load_draw_bbox_btn = QPushButton("□ Draw")
+        self.load_draw_bbox_btn.setMaximumWidth(70)
+        self.load_draw_bbox_btn.setEnabled(False)
+        self.load_draw_bbox_btn.clicked.connect(self._start_draw_bbox_load)
+        draw_bbox_layout.addWidget(self.load_draw_bbox_btn)
+        self.load_clear_bbox_btn = QPushButton("Clear")
+        self.load_clear_bbox_btn.setMaximumWidth(50)
+        self.load_clear_bbox_btn.setEnabled(False)
+        self.load_clear_bbox_btn.clicked.connect(self._clear_drawn_bbox_load)
+        draw_bbox_layout.addWidget(self.load_clear_bbox_btn)
+        spatial_layout.addLayout(draw_bbox_layout)
+
+        self.load_bbox_label = QLabel("")
+        self.load_bbox_label.setStyleSheet("color: #aaaaaa; font-size: 9px;")
+        self.load_bbox_label.setWordWrap(True)
+        spatial_layout.addWidget(self.load_bbox_label)
+
+        # Connect radio buttons to enable/disable draw button
+        self.load_spatial_draw.toggled.connect(
+            lambda checked: self.load_draw_bbox_btn.setEnabled(checked)
+        )
+
+        filters_layout.addRow(spatial_group)
 
         layout.addWidget(filters_group)
+
+        # Property filters group
+        prop_filter_group = QGroupBox("Property Filters (Optional)")
+        prop_filter_layout = QVBoxLayout(prop_filter_group)
+
+        prop_filter_help = QLabel(
+            "Add custom property filters. One per line in format:\n"
+            "property_name operator value (e.g., SUN_ELEVATION > 30)"
+        )
+        prop_filter_help.setStyleSheet("color: gray; font-size: 10px;")
+        prop_filter_help.setWordWrap(True)
+        prop_filter_layout.addWidget(prop_filter_help)
+
+        self.load_property_filters = QPlainTextEdit()
+        self.load_property_filters.setPlaceholderText(
+            "SUN_ELEVATION > 30\nSUN_AZIMUTH < 180"
+        )
+        self.load_property_filters.setMaximumHeight(80)
+        prop_filter_layout.addWidget(self.load_property_filters)
+
+        # Operator reference
+        operator_label = QLabel(
+            "Operators: == (equals), != (not equals), < > <= >= (comparison)"
+        )
+        operator_label.setStyleSheet("color: gray; font-size: 9px;")
+        prop_filter_layout.addWidget(operator_label)
+
+        layout.addWidget(prop_filter_group)
 
         # Image selection group (for ImageCollections)
         image_group = QGroupBox("Image Selection (for ImageCollections)")
@@ -1483,8 +2350,8 @@ class CatalogDockWidget(QDockWidget):
 
     def _on_tab_changed(self, index):
         """Handle tab changes."""
-        # Refresh layer count when switching to Inspector tab (index 4)
-        if index == 4:  # Inspector tab
+        # Refresh layer count when switching to Inspector tab (index 6 after adding Time Series tab)
+        if index == 6:  # Inspector tab
             self._refresh_inspector_layers()
 
     def _toggle_image_selection(self, checked):
@@ -1628,11 +2495,15 @@ class CatalogDockWidget(QDockWidget):
             self._reset_vis_params()
             self.add_map_btn.setEnabled(True)
             self.configure_btn.setEnabled(True)
+            # Enable time series button only for ImageCollections
+            is_image_collection = dataset.get("type", "").lower() == "imagecollection"
+            self.timeseries_btn.setEnabled(is_image_collection)
         else:
             self._selected_dataset = None
             self.info_text.clear()
             self.add_map_btn.setEnabled(False)
             self.configure_btn.setEnabled(False)
+            self.timeseries_btn.setEnabled(False)
 
     def _on_dataset_double_clicked(self, item, _column):
         """Handle double-click on dataset."""
@@ -1822,7 +2693,53 @@ class CatalogDockWidget(QDockWidget):
             self.dataset_id_input.setText(self._selected_dataset.get("id", ""))
             self.layer_name_input.setText(self._selected_dataset.get("name", "")[:50])
 
-            # Switch to Load tab
+            # Switch to Load tab (index 3 after Time Series tab)
+            self.tab_widget.setCurrentIndex(3)
+
+    def _configure_timeseries(self):
+        """Configure time series from the selected dataset."""
+        if self._selected_dataset:
+            asset_id = self._selected_dataset.get("id", "")
+            name = self._selected_dataset.get("name", asset_id.split("/")[-1])[:40]
+
+            # Populate the time series tab with dataset info
+            self.ts_dataset_id_input.setText(asset_id)
+            self.ts_layer_name_input.setText(f"{name} Time Series")
+
+            # Try to set reasonable date range from dataset metadata
+            start_date = self._selected_dataset.get("start_date", "")
+            end_date = self._selected_dataset.get("end_date", "")
+
+            if start_date:
+                try:
+                    from datetime import datetime
+
+                    # Parse date in various formats
+                    for fmt in ["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%SZ"]:
+                        try:
+                            dt = datetime.strptime(start_date[:10], "%Y-%m-%d")
+                            self.ts_start_date.setDate(dt)
+                            break
+                        except ValueError:
+                            continue
+                except Exception:
+                    pass
+
+            if end_date:
+                try:
+                    from datetime import datetime
+
+                    for fmt in ["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%SZ"]:
+                        try:
+                            dt = datetime.strptime(end_date[:10], "%Y-%m-%d")
+                            self.ts_end_date.setDate(dt)
+                            break
+                        except ValueError:
+                            continue
+                except Exception:
+                    pass
+
+            # Switch to Time Series tab (index 2)
             self.tab_widget.setCurrentIndex(2)
 
     def _add_dataset_to_map(self, dataset):
@@ -1953,6 +2870,11 @@ class CatalogDockWidget(QDockWidget):
             self._selected_dataset = dataset
             self._show_search_dataset_info(dataset)
             self._reset_vis_params()
+            # Enable time series button only for ImageCollections
+            is_image_collection = dataset.get("type", "").lower() == "imagecollection"
+            self.search_timeseries_btn.setEnabled(is_image_collection)
+        else:
+            self.search_timeseries_btn.setEnabled(False)
 
     def _on_search_result_double_clicked(self, item, _column):
         """Handle double-click on search result."""
@@ -1977,8 +2899,18 @@ class CatalogDockWidget(QDockWidget):
                 # Populate the load tab with dataset info
                 self.dataset_id_input.setText(dataset.get("id", ""))
                 self.layer_name_input.setText(dataset.get("name", "")[:50])
-                # Switch to Load tab
-                self.tab_widget.setCurrentIndex(2)
+                # Switch to Load tab (index 3 after Time Series tab)
+                self.tab_widget.setCurrentIndex(3)
+
+    def _configure_search_timeseries(self):
+        """Configure time series from selected search result."""
+        items = self.search_results.selectedItems()
+        if items:
+            dataset = items[0].data(0, Qt.UserRole)
+            if dataset:
+                # Store as selected dataset and use common method
+                self._selected_dataset = dataset
+                self._configure_timeseries()
 
     def _fetch_images(self):
         """Fetch available images from the ImageCollection."""
@@ -2001,22 +2933,30 @@ class CatalogDockWidget(QDockWidget):
             # Build filtered collection
             collection = ee.ImageCollection(asset_id)
 
-            # Apply filters
+            # Apply date filter
             if self.use_date_filter.isChecked():
                 start = self.start_date.date().toString("yyyy-MM-dd")
                 end = self.end_date.date().toString("yyyy-MM-dd")
                 collection = collection.filterDate(start, end)
 
-            if self.use_bbox_filter.isChecked():
-                bbox = self._get_map_extent_wgs84()
-                if bbox:
-                    geometry = ee.Geometry.Rectangle(bbox)
-                    collection = collection.filterBounds(geometry)
+            # Apply spatial filter
+            bbox = self._get_spatial_filter_load()
+            if bbox:
+                geometry = ee.Geometry.Rectangle(bbox)
+                collection = collection.filterBounds(geometry)
 
+            # Apply cloud filter
             if self.use_cloud_filter.isChecked():
                 cloud_cover = self.cloud_cover_spin.value()
-                cloud_prop = self._get_cloud_property(asset_id)
+                custom_cloud_prop = self.cloud_property_input.text().strip()
+                cloud_prop = self._get_cloud_property(asset_id, custom_cloud_prop)
                 collection = collection.filter(ee.Filter.lt(cloud_prop, cloud_cover))
+
+            # Apply property filters
+            property_filters = self._parse_property_filters(
+                self.load_property_filters.toPlainText()
+            )
+            collection = self._apply_property_filters(collection, property_filters)
 
             self._filtered_collection = collection
 
@@ -2157,12 +3097,12 @@ class CatalogDockWidget(QDockWidget):
             end_date = self.end_date.date().toString("yyyy-MM-dd")
 
         cloud_cover = None
+        custom_cloud_prop = self.cloud_property_input.text().strip()
+        cloud_property = self._get_cloud_property(asset_id, custom_cloud_prop)
         if self.use_cloud_filter.isChecked():
             cloud_cover = self.cloud_cover_spin.value()
 
-        bbox = None
-        if self.use_bbox_filter.isChecked():
-            bbox = self._get_map_extent_wgs84()
+        bbox = self._get_spatial_filter_load()
 
         collection = filter_image_collection(
             collection,
@@ -2170,7 +3110,14 @@ class CatalogDockWidget(QDockWidget):
             end_date=end_date,
             bbox=bbox,
             cloud_cover=cloud_cover,
+            cloud_property=cloud_property,
         )
+
+        # Apply property filters
+        property_filters = self._parse_property_filters(
+            self.load_property_filters.toPlainText()
+        )
+        collection = self._apply_property_filters(collection, property_filters)
 
         method = self.agg_method.currentText()
         if method == "mosaic":
@@ -2432,16 +3379,15 @@ class CatalogDockWidget(QDockWidget):
                     f"collection = collection.filter(ee.Filter.lt('{cloud_prop}', {cloud_cover}))"
                 )
 
-            if self.use_bbox_filter.isChecked():
-                # Get the current map extent in WGS84
-                bbox = self._get_map_extent_wgs84()
-                if bbox:
-                    west, south, east, north = bbox
-                    code_lines.append(f"# Filter by current map extent (EPSG:4326)")
-                    code_lines.append(
-                        f"geometry = ee.Geometry.Rectangle([{west}, {south}, {east}, {north}])"
-                    )
-                    code_lines.append(f"collection = collection.filterBounds(geometry)")
+            # Spatial filter
+            bbox = self._get_spatial_filter_load()
+            if bbox:
+                west, south, east, north = bbox
+                code_lines.append(f"# Spatial filter (EPSG:4326)")
+                code_lines.append(
+                    f"geometry = ee.Geometry.Rectangle([{west}, {south}, {east}, {north}])"
+                )
+                code_lines.append(f"collection = collection.filterBounds(geometry)")
 
             # Add composite method
             method = self.agg_method.currentText()
@@ -2602,7 +3548,9 @@ class CatalogDockWidget(QDockWidget):
 
         # Paste code to Code tab and switch to it
         self.code_input.setPlainText(code)
-        self.tab_widget.setCurrentIndex(3)  # Switch to Code tab
+        self.tab_widget.setCurrentIndex(
+            4
+        )  # Switch to Code tab (index 4 after Time Series tab)
 
     def _run_code(self):
         """Execute the code in the console."""
@@ -3178,11 +4126,673 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
         self.inspector_status_label.setText(f"Error: {error}")
         self.inspector_status_label.setStyleSheet("color: red; font-size: 10px;")
 
+    # ==================== Time Series Methods ====================
+
+    def _create_timeseries(self):
+        """Create a time series from the specified ImageCollection."""
+        if ee is None:
+            QMessageBox.warning(
+                self,
+                "Warning",
+                "Earth Engine API not available. Please install earthengine-api.",
+            )
+            return
+
+        asset_id = self.ts_dataset_id_input.text().strip()
+        if not asset_id:
+            QMessageBox.warning(self, "Warning", "Please enter an asset ID.")
+            return
+
+        # Stop any existing playback
+        self._stop_timeseries_playback()
+
+        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
+        self.ts_create_btn.setEnabled(False)
+
+        try:
+            start_date = self.ts_start_date.date().toString("yyyy-MM-dd")
+            end_date = self.ts_end_date.date().toString("yyyy-MM-dd")
+            frequency = self.ts_frequency_combo.currentText()
+            reducer = self.ts_reducer_combo.currentText()
+
+            # Get bands if specified
+            bands = None
+            bands_text = self.ts_bands_input.text().strip()
+            if bands_text:
+                bands = [
+                    b.strip().strip("\"'") for b in bands_text.split(",") if b.strip()
+                ]
+
+            # Get spatial filter
+            region = self._get_spatial_filter_ts()
+
+            # Get cloud cover settings
+            cloud_cover = None
+            custom_cloud_property = self.ts_cloud_property_input.text().strip()
+            cloud_property = self._get_cloud_property(asset_id, custom_cloud_property)
+            if self.ts_use_cloud_filter.isChecked():
+                cloud_cover = self.ts_cloud_cover_spin.value()
+
+            # Get property filters
+            property_filters = self._parse_property_filters(
+                self.ts_property_filters.toPlainText()
+            )
+
+            self._show_progress(f"Creating time series for {asset_id}...")
+
+            # Start background thread
+            self._timeseries_thread = TimeSeriesLoaderThread(
+                asset_id=asset_id,
+                start_date=start_date,
+                end_date=end_date,
+                frequency=frequency,
+                reducer=reducer,
+                bands=bands,
+                region=region,
+                cloud_cover=cloud_cover,
+                cloud_property=cloud_property,
+                property_filters=property_filters,
+            )
+            self._timeseries_thread.finished.connect(self._on_timeseries_created)
+            self._timeseries_thread.error.connect(self._on_timeseries_error)
+            self._timeseries_thread.progress.connect(
+                lambda msg: self.ts_info_label.setText(msg)
+            )
+            self._timeseries_thread.start()
+
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            self.ts_create_btn.setEnabled(True)
+            self._show_error(f"Failed to create time series: {str(e)}")
+
+    def _on_timeseries_created(self, images_data, labels):
+        """Handle time series created successfully."""
+        QApplication.restoreOverrideCursor()
+        self.ts_create_btn.setEnabled(True)
+
+        if not images_data:
+            self._show_error("No images found in the time series")
+            return
+
+        # Store time series data
+        self._timeseries_images = images_data
+        self._timeseries_labels = labels
+
+        # Build the ImageCollection for visualization
+        asset_id = self.ts_dataset_id_input.text().strip()
+        start_date = self.ts_start_date.date().toString("yyyy-MM-dd")
+        end_date = self.ts_end_date.date().toString("yyyy-MM-dd")
+        frequency = self.ts_frequency_combo.currentText()
+        reducer = self.ts_reducer_combo.currentText()
+
+        # Get bands if specified
+        bands = None
+        bands_text = self.ts_bands_input.text().strip()
+        if bands_text:
+            bands = [b.strip().strip("\"'") for b in bands_text.split(",") if b.strip()]
+
+        # Get spatial filter
+        region = self._get_spatial_filter_ts()
+
+        # Get cloud cover settings
+        cloud_cover = None
+        custom_cloud_property = self.ts_cloud_property_input.text().strip()
+        cloud_property = self._get_cloud_property(asset_id, custom_cloud_property)
+        if self.ts_use_cloud_filter.isChecked():
+            cloud_cover = self.ts_cloud_cover_spin.value()
+
+        # Get property filters
+        property_filters = self._parse_property_filters(
+            self.ts_property_filters.toPlainText()
+        )
+
+        try:
+            # Create the time series collection using geemap's approach
+            self._timeseries_collection = self._build_timeseries_collection(
+                asset_id=asset_id,
+                start_date=start_date,
+                end_date=end_date,
+                frequency=frequency,
+                reducer=reducer,
+                bands=bands,
+                region=region,
+                cloud_cover=cloud_cover,
+                cloud_property=cloud_property,
+                property_filters=property_filters,
+            )
+
+            # Build visualization parameters
+            self._timeseries_vis_params = self._build_ts_vis_params()
+
+            # Update slider
+            self.ts_time_slider.setMaximum(len(labels) - 1)
+            self.ts_time_slider.setValue(0)
+            self.ts_time_slider.setEnabled(True)
+            self.ts_prev_btn.setEnabled(True)
+            self.ts_play_btn.setEnabled(True)
+            self.ts_next_btn.setEnabled(True)
+
+            # Update label
+            self.ts_current_label.setText(labels[0] if labels else "No data")
+
+            # Update info
+            self.ts_info_label.setText(
+                f"Time series created with {len(labels)} time steps. "
+                f"Use the slider or Play button to animate."
+            )
+
+            # Display first image
+            self._display_timeseries_image(0)
+
+            self._show_success(f"Time series created with {len(labels)} images")
+
+        except Exception as e:
+            import traceback
+
+            self._show_error(
+                f"Failed to build time series: {str(e)}\n{traceback.format_exc()}"
+            )
+
+    def _on_timeseries_error(self, error):
+        """Handle time series creation error."""
+        QApplication.restoreOverrideCursor()
+        self.ts_create_btn.setEnabled(True)
+        self._show_error(f"Time series error: {error}")
+
+    def _build_timeseries_collection(
+        self,
+        asset_id: str,
+        start_date: str,
+        end_date: str,
+        frequency: str = "month",
+        reducer: str = "median",
+        bands: list = None,
+        region: list = None,
+        cloud_cover: int = None,
+        cloud_property: str = "CLOUDY_PIXEL_PERCENTAGE",
+        property_filters: list = None,
+    ):
+        """Build a time series ImageCollection.
+
+        This is similar to geemap's create_timeseries function but returns
+        a list of images for QGIS visualization.
+        """
+        from datetime import datetime
+        from dateutil.relativedelta import relativedelta
+
+        collection = ee.ImageCollection(asset_id)
+
+        # Apply filters
+        collection = collection.filterDate(start_date, end_date)
+
+        region_geom = None
+        if region:
+            region_geom = ee.Geometry.Rectangle(region)
+            collection = collection.filterBounds(region_geom)
+
+        if cloud_cover is not None:
+            collection = collection.filter(ee.Filter.lt(cloud_property, cloud_cover))
+
+        # Apply property filters
+        if property_filters:
+            collection = self._apply_property_filters(collection, property_filters)
+
+        if bands:
+            collection = collection.select(bands)
+
+        # Get frequency settings
+        freq_dict = {
+            "day": ("day", 1),
+            "week": ("day", 7),
+            "month": ("month", 1),
+            "quarter": ("month", 3),
+            "year": ("year", 1),
+        }
+
+        unit, step = freq_dict.get(frequency, ("month", 1))
+
+        # Generate date sequence
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+
+        dates = []
+        current = start_dt
+        while current < end_dt:
+            dates.append(current.strftime("%Y-%m-%d"))
+            if unit == "day":
+                current += relativedelta(days=step)
+            elif unit == "month":
+                current += relativedelta(months=step)
+            elif unit == "year":
+                current += relativedelta(years=step)
+
+        # Get reducer function
+        reducer_func = getattr(ee.Reducer, reducer)()
+
+        # Create image for each time step
+        images = []
+        for date_str in dates:
+            start = ee.Date(date_str)
+            if unit == "day":
+                end = start.advance(step, "day")
+            elif unit == "month":
+                end = start.advance(step, "month")
+            elif unit == "year":
+                end = start.advance(step, "year")
+
+            sub_col = collection.filterDate(start, end)
+            if region_geom:
+                sub_col = sub_col.filterBounds(region_geom)
+
+            image = sub_col.reduce(reducer_func)
+
+            # Set date property
+            image = image.set(
+                {
+                    "system:time_start": start.millis(),
+                    "system:date": start.format("YYYY-MM-dd"),
+                }
+            )
+
+            # Clip to region if specified
+            if region_geom:
+                image = image.clip(region_geom)
+
+            images.append(image)
+
+        return images
+
+    def _build_ts_vis_params(self):
+        """Build visualization parameters for time series."""
+        vis_params = {}
+
+        bands = self.ts_bands_input.text().strip()
+        if bands:
+            vis_params["bands"] = [
+                b.strip().strip("\"'")
+                for b in bands.split(",")
+                if b.strip().strip("\"'")
+            ]
+
+        vis_min_text = self.ts_vis_min_input.text().strip()
+        vis_max_text = self.ts_vis_max_input.text().strip()
+
+        if vis_min_text:
+            try:
+                vis_params["min"] = float(vis_min_text)
+            except ValueError:
+                pass
+
+        if vis_max_text:
+            try:
+                vis_params["max"] = float(vis_max_text)
+            except ValueError:
+                pass
+
+        palette = self.ts_palette_input.text().strip()
+        if palette:
+            palette_colors = self._get_colormap_colors(palette)
+            if palette_colors:
+                vis_params["palette"] = palette_colors
+            else:
+                vis_params["palette"] = [
+                    p.strip().strip("\"'")
+                    for p in palette.split(",")
+                    if p.strip().strip("\"'")
+                ]
+
+        # If bands contain reducer suffixes, update them
+        if "bands" in vis_params:
+            reducer = self.ts_reducer_combo.currentText()
+            # The reducer adds a suffix like '_median' to band names
+            vis_params["bands"] = [f"{b}_{reducer}" for b in vis_params["bands"]]
+
+        return vis_params
+
+    def _display_timeseries_image(self, index):
+        """Display the time series image at the given index."""
+        if not self._timeseries_collection or index >= len(self._timeseries_collection):
+            return
+
+        try:
+            from ..core.ee_utils import add_ee_layer
+
+            image = self._timeseries_collection[index]
+            layer_name = self.ts_layer_name_input.text().strip() or "Time Series"
+
+            # Add the layer (will replace existing layer with same name)
+            add_ee_layer(image, self._timeseries_vis_params, layer_name)
+
+            # Update label
+            if index < len(self._timeseries_labels):
+                self.ts_current_label.setText(
+                    f"{self._timeseries_labels[index]} ({index + 1}/{len(self._timeseries_labels)})"
+                )
+
+        except Exception as e:
+            self.ts_info_label.setText(f"Error displaying image: {str(e)}")
+
+    def _on_timeslider_changed(self, value):
+        """Handle time slider value changed."""
+        if not self._timeseries_collection:
+            return
+
+        self._timeseries_current_index = value
+        self._display_timeseries_image(value)
+
+    def _timeseries_prev(self):
+        """Go to previous time step."""
+        if not self._timeseries_collection:
+            return
+
+        current = self.ts_time_slider.value()
+        if current > 0:
+            self.ts_time_slider.setValue(current - 1)
+        elif self.ts_loop_check.isChecked():
+            self.ts_time_slider.setValue(self.ts_time_slider.maximum())
+
+    def _timeseries_next(self):
+        """Go to next time step."""
+        if not self._timeseries_collection:
+            return
+
+        current = self.ts_time_slider.value()
+        max_index = self.ts_time_slider.maximum()
+        if current < max_index:
+            self.ts_time_slider.setValue(current + 1)
+        elif self.ts_loop_check.isChecked():
+            self.ts_time_slider.setValue(0)
+
+    def _timeseries_toggle_play(self):
+        """Toggle time series playback."""
+        if self._timeseries_playing:
+            self._stop_timeseries_playback()
+        else:
+            self._start_timeseries_playback()
+
+    def _start_timeseries_playback(self):
+        """Start time series animation."""
+        if not self._timeseries_collection:
+            return
+
+        self._timeseries_playing = True
+        self.ts_play_btn.setText("⏸ Pause")
+
+        # Create timer if it doesn't exist
+        if not self._timeseries_timer:
+            self._timeseries_timer = QTimer()
+            self._timeseries_timer.timeout.connect(self._timeseries_timer_tick)
+
+        # Set interval from speed control
+        self._timeseries_timer.setInterval(self.ts_speed_spin.value())
+        self._timeseries_timer.start()
+
+    def _stop_timeseries_playback(self):
+        """Stop time series animation."""
+        self._timeseries_playing = False
+        self.ts_play_btn.setText("▶ Play")
+
+        if self._timeseries_timer:
+            self._timeseries_timer.stop()
+
+    def _timeseries_timer_tick(self):
+        """Handle timer tick for animation."""
+        if not self._timeseries_playing or not self._timeseries_collection:
+            self._stop_timeseries_playback()
+            return
+
+        current = self.ts_time_slider.value()
+        max_index = self.ts_time_slider.maximum()
+        if current < max_index:
+            self.ts_time_slider.setValue(current + 1)
+        elif self.ts_loop_check.isChecked():
+            self.ts_time_slider.setValue(0)
+        else:
+            self._stop_timeseries_playback()
+
+    def _update_timeseries_timer_interval(self, value):
+        """Update the timer interval when speed changes."""
+        if self._timeseries_timer:
+            self._timeseries_timer.setInterval(value)
+
+    def _preview_timeseries(self):
+        """Preview time series information."""
+        if ee is None:
+            QMessageBox.warning(self, "Warning", "Earth Engine API not available.")
+            return
+
+        asset_id = self.ts_dataset_id_input.text().strip()
+        if not asset_id:
+            QMessageBox.warning(self, "Warning", "Please enter an asset ID.")
+            return
+
+        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
+
+        try:
+            start_date = self.ts_start_date.date().toString("yyyy-MM-dd")
+            end_date = self.ts_end_date.date().toString("yyyy-MM-dd")
+
+            collection = ee.ImageCollection(asset_id)
+            collection = collection.filterDate(start_date, end_date)
+
+            # Apply cloud filter if enabled
+            if self.ts_use_cloud_filter.isChecked():
+                cloud_cover = self.ts_cloud_cover_spin.value()
+                cloud_property = self._get_cloud_property(asset_id)
+                collection = collection.filter(
+                    ee.Filter.lt(cloud_property, cloud_cover)
+                )
+
+            # Apply region filter if enabled
+            region = self._get_spatial_filter_ts()
+            if region:
+                geometry = ee.Geometry.Rectangle(region)
+                collection = collection.filterBounds(geometry)
+
+            size = collection.size().getInfo()
+
+            info_text = f"Asset: {asset_id}\n"
+            info_text += f"Date Range: {start_date} to {end_date}\n"
+            info_text += f"Matching Images: {size}\n\n"
+
+            if size > 0:
+                first = collection.first()
+                bands = first.bandNames().getInfo()
+                info_text += f"Bands: {len(bands)}\n"
+                for band in bands[:10]:
+                    info_text += f"  - {band}\n"
+                if len(bands) > 10:
+                    info_text += f"  ... and {len(bands) - 10} more\n"
+
+            # Estimate time steps
+            frequency = self.ts_frequency_combo.currentText()
+            from datetime import datetime
+            from dateutil.relativedelta import relativedelta
+
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+
+            freq_dict = {
+                "day": relativedelta(days=1),
+                "week": relativedelta(weeks=1),
+                "month": relativedelta(months=1),
+                "quarter": relativedelta(months=3),
+                "year": relativedelta(years=1),
+            }
+
+            delta = freq_dict.get(frequency, relativedelta(months=1))
+            steps = 0
+            current = start_dt
+            while current < end_dt:
+                steps += 1
+                current += delta
+
+            info_text += f"\nEstimated Time Steps ({frequency}): {steps}"
+
+            QMessageBox.information(self, "Time Series Info", info_text)
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to get info: {str(e)}")
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def _copy_timeseries_code(self):
+        """Copy Python code for creating the time series."""
+        asset_id = self.ts_dataset_id_input.text().strip()
+        if not asset_id:
+            QMessageBox.warning(self, "Warning", "Please enter an asset ID.")
+            return
+
+        start_date = self.ts_start_date.date().toString("yyyy-MM-dd")
+        end_date = self.ts_end_date.date().toString("yyyy-MM-dd")
+        frequency = self.ts_frequency_combo.currentText()
+        reducer = self.ts_reducer_combo.currentText()
+        layer_name = self.ts_layer_name_input.text().strip() or "Time Series"
+
+        code_lines = [
+            "import ee",
+            "import geemap",
+            "",
+            "m = geemap.Map()",
+            "",
+            f"# Create time series from {asset_id}",
+            f"collection = ee.ImageCollection('{asset_id}')",
+            f"",
+            f"# Date range",
+            f"start_date = '{start_date}'",
+            f"end_date = '{end_date}'",
+            f"",
+        ]
+
+        # Add cloud filter
+        if self.ts_use_cloud_filter.isChecked():
+            cloud_cover = self.ts_cloud_cover_spin.value()
+            custom_cloud_prop = self.ts_cloud_property_input.text().strip()
+            cloud_property = self._get_cloud_property(asset_id, custom_cloud_prop)
+            code_lines.append(f"# Cloud filter")
+            code_lines.append(
+                f"collection = collection.filter(ee.Filter.lt('{cloud_property}', {cloud_cover}))"
+            )
+            code_lines.append("")
+
+        # Add spatial filter
+        bbox = self._get_spatial_filter_ts()
+        if bbox:
+            west, south, east, north = bbox
+            code_lines.append(f"# Spatial filter")
+            code_lines.append(
+                f"region = ee.Geometry.Rectangle([{west}, {south}, {east}, {north}])"
+            )
+            code_lines.append("")
+
+        # Add property filters
+        property_filters = self._parse_property_filters(
+            self.ts_property_filters.toPlainText()
+        )
+        if property_filters:
+            code_lines.append("# Property filters")
+            for prop_name, op, value in property_filters:
+                if op == "==":
+                    code_lines.append(
+                        f"collection = collection.filter(ee.Filter.eq('{prop_name}', {repr(value)}))"
+                    )
+                elif op == "!=":
+                    code_lines.append(
+                        f"collection = collection.filter(ee.Filter.neq('{prop_name}', {repr(value)}))"
+                    )
+                elif op == ">":
+                    code_lines.append(
+                        f"collection = collection.filter(ee.Filter.gt('{prop_name}', {value}))"
+                    )
+                elif op == ">=":
+                    code_lines.append(
+                        f"collection = collection.filter(ee.Filter.gte('{prop_name}', {value}))"
+                    )
+                elif op == "<":
+                    code_lines.append(
+                        f"collection = collection.filter(ee.Filter.lt('{prop_name}', {value}))"
+                    )
+                elif op == "<=":
+                    code_lines.append(
+                        f"collection = collection.filter(ee.Filter.lte('{prop_name}', {value}))"
+                    )
+            code_lines.append("")
+
+        # Build visualization params
+        vis_parts = []
+        bands = self.ts_bands_input.text().strip()
+        if bands:
+            band_list = [b.strip().strip("\"'") for b in bands.split(",") if b.strip()]
+            vis_parts.append(f"'bands': {band_list}")
+
+        vis_min = self.ts_vis_min_input.text().strip()
+        vis_max = self.ts_vis_max_input.text().strip()
+        if vis_min and vis_max:
+            try:
+                vis_parts.append(f"'min': {float(vis_min)}")
+                vis_parts.append(f"'max': {float(vis_max)}")
+            except ValueError:
+                pass
+
+        palette = self.ts_palette_input.text().strip()
+        if palette:
+            if "," in palette:
+                palette_list = [p.strip().strip("\"'") for p in palette.split(",")]
+                vis_parts.append(f"'palette': {palette_list}")
+            else:
+                vis_parts.append(f"'palette': '{palette}'")
+
+        code_lines.append("# Create time series using geemap")
+        code_lines.append(f"timeseries = geemap.create_timeseries(")
+        code_lines.append(f"    collection,")
+        code_lines.append(f"    start_date=start_date,")
+        code_lines.append(f"    end_date=end_date,")
+        code_lines.append(f"    frequency='{frequency}',")
+        code_lines.append(f"    reducer='{reducer}',")
+        if bbox:
+            code_lines.append(f"    region=region,")
+        code_lines.append(f")")
+        code_lines.append("")
+
+        # Visualization params
+        code_lines.append("# Visualization parameters")
+        if vis_parts:
+            code_lines.append("vis_params = {" + ", ".join(vis_parts) + "}")
+        else:
+            code_lines.append("vis_params = {}")
+        code_lines.append("")
+
+        # Add time slider
+        code_lines.append("# Add time slider to map")
+        code_lines.append(
+            f"m.add_time_slider(timeseries, vis_params, layer_name='{layer_name}')"
+        )
+        code_lines.append("")
+        code_lines.append("m")
+
+        code = "\n".join(code_lines)
+
+        # Copy to clipboard
+        clipboard = QApplication.clipboard()
+        clipboard.setText(code)
+
+        self._show_success("Time series code copied to clipboard!")
+
+        # Paste code to Code tab and switch to it
+        self.code_input.setPlainText(code)
+        self.tab_widget.setCurrentIndex(4)  # Code tab
+
     def closeEvent(self, event):
         """Handle dock widget close event."""
         # Deactivate inspector if active
         if self._inspector_map_tool:
             self._inspector_map_tool.deactivate()
+
+        # Stop time series playback and timer
+        self._stop_timeseries_playback()
+        if self._timeseries_timer:
+            self._timeseries_timer.stop()
+            self._timeseries_timer = None
 
         # Stop any running threads
         if self._catalog_thread and self._catalog_thread.isRunning():
@@ -3200,4 +4810,7 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
         if self._inspector_thread and self._inspector_thread.isRunning():
             self._inspector_thread.terminate()
             self._inspector_thread.wait()
+        if self._timeseries_thread and self._timeseries_thread.isRunning():
+            self._timeseries_thread.terminate()
+            self._timeseries_thread.wait()
         event.accept()
