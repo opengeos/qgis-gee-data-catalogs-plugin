@@ -102,7 +102,9 @@ class PreviewInfoThread(QThread):
 
             # If selected images are provided, show info as an ImageCollection
             if self.selected_images:
-                self.progress.emit(f"Getting info for {len(self.selected_images)} image(s)...")
+                self.progress.emit(
+                    f"Getting info for {len(self.selected_images)} image(s)..."
+                )
 
                 # Create an ImageCollection from the selected images
                 image_ids = [img_info["id"] for img_info in self.selected_images]
@@ -114,10 +116,16 @@ class PreviewInfoThread(QThread):
                 info_text += f"Size: {size} images\n\n"
 
                 # Get date range
-                dates = [img_info.get("date", "") for img_info in self.selected_images if img_info.get("date")]
+                dates = [
+                    img_info.get("date", "")
+                    for img_info in self.selected_images
+                    if img_info.get("date")
+                ]
                 if dates:
                     dates_sorted = sorted(dates)
-                    info_text += f"Date Range: {dates_sorted[0]} to {dates_sorted[-1]}\n\n"
+                    info_text += (
+                        f"Date Range: {dates_sorted[0]} to {dates_sorted[-1]}\n\n"
+                    )
 
                 # Get bands from first image
                 if size > 0:
@@ -1865,7 +1873,9 @@ class CatalogDockWidget(QDockWidget):
                     img_info = item.data(Qt.UserRole)
                     if img_info:
                         selected_images.append(img_info)
-                self._show_progress(f"Getting info for {len(selected_images)} selected image(s)...")
+                self._show_progress(
+                    f"Getting info for {len(selected_images)} selected image(s)..."
+                )
             else:
                 # No selection - preview all items in the list
                 selected_images = []
@@ -1874,7 +1884,9 @@ class CatalogDockWidget(QDockWidget):
                     img_info = item.data(Qt.UserRole)
                     if img_info:
                         selected_images.append(img_info)
-                self._show_progress(f"Getting info for {len(selected_images)} image(s) in list...")
+                self._show_progress(
+                    f"Getting info for {len(selected_images)} image(s) in list..."
+                )
         else:
             self._show_progress(f"Getting info for {asset_id}...")
 
