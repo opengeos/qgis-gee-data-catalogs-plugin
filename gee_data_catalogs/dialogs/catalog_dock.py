@@ -415,10 +415,6 @@ class TimeSeriesLoaderThread(QThread):
                 # Filter collection for this time period
                 sub_col = collection.filterDate(start, end)
 
-                # Apply region clipping if specified
-                if region:
-                    sub_col = sub_col.filterBounds(region)
-
                 # Reduce to single image
                 image = sub_col.reduce(reducer_func)
 
