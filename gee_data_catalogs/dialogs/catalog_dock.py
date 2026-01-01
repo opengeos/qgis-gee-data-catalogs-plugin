@@ -86,17 +86,51 @@ class PreviewInfoThread(QThread):
         use_date_filter: bool = False,
         start_date: str = None,
         end_date: str = None,
+        selected_images: list = None,
     ):
         super().__init__()
         self.asset_id = asset_id
         self.use_date_filter = use_date_filter
         self.start_date = start_date
         self.end_date = end_date
+        self.selected_images = selected_images  # List of {"id": ..., "date": ...}
 
     def run(self):
         try:
             import ee
             from ..core.ee_utils import detect_asset_type
+
+            # If selected images are provided, show info as an ImageCollection
+            if self.selected_images:
+                self.progress.emit(f"Getting info for {len(self.selected_images)} image(s)...")
+
+                # Create an ImageCollection from the selected images
+                image_ids = [img_info["id"] for img_info in self.selected_images]
+                collection = ee.ImageCollection(image_ids)
+
+                size = collection.size().getInfo()
+                info_text = f"Type: ImageCollection (filtered)\n"
+                info_text += f"From: {self.asset_id}\n"
+                info_text += f"Size: {size} images\n\n"
+
+                # Get date range
+                dates = [img_info.get("date", "") for img_info in self.selected_images if img_info.get("date")]
+                if dates:
+                    dates_sorted = sorted(dates)
+                    info_text += f"Date Range: {dates_sorted[0]} to {dates_sorted[-1]}\n\n"
+
+                # Get bands from first image
+                if size > 0:
+                    first = collection.first()
+                    bands = first.bandNames().getInfo()
+                    info_text += f"Bands per image: {len(bands)}\n"
+                    for band in bands[:10]:
+                        info_text += f"  - {band}\n"
+                    if len(bands) > 10:
+                        info_text += f"  ... and {len(bands) - 10} more\n"
+
+                self.finished.emit(info_text)
+                return
 
             self.progress.emit(f"Detecting asset type...")
 
@@ -1819,7 +1853,30 @@ class CatalogDockWidget(QDockWidget):
             return
 
         self.preview_btn.setEnabled(False)
-        self._show_progress(f"Getting info for {asset_id}...")
+
+        # Check for images in the list
+        selected_images = None
+        if self.image_list_widget.isVisible() and self.image_list_widget.count() > 0:
+            selected_items = self.image_list_widget.selectedItems()
+            if selected_items:
+                # Preview only selected items
+                selected_images = []
+                for item in selected_items:
+                    img_info = item.data(Qt.UserRole)
+                    if img_info:
+                        selected_images.append(img_info)
+                self._show_progress(f"Getting info for {len(selected_images)} selected image(s)...")
+            else:
+                # No selection - preview all items in the list
+                selected_images = []
+                for i in range(self.image_list_widget.count()):
+                    item = self.image_list_widget.item(i)
+                    img_info = item.data(Qt.UserRole)
+                    if img_info:
+                        selected_images.append(img_info)
+                self._show_progress(f"Getting info for {len(selected_images)} image(s) in list...")
+        else:
+            self._show_progress(f"Getting info for {asset_id}...")
 
         # Get filter params
         use_date_filter = self.use_date_filter.isChecked()
@@ -1832,7 +1889,7 @@ class CatalogDockWidget(QDockWidget):
 
         # Start background thread
         self._preview_thread = PreviewInfoThread(
-            asset_id, use_date_filter, start_date, end_date
+            asset_id, use_date_filter, start_date, end_date, selected_images
         )
         self._preview_thread.finished.connect(self._on_preview_finished)
         self._preview_thread.error.connect(self._on_preview_error)
