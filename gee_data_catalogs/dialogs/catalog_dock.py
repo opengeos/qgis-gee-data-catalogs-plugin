@@ -4564,7 +4564,9 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
             # Apply cloud filter if enabled
             if self.ts_use_cloud_filter.isChecked():
                 cloud_cover = self.ts_cloud_cover_spin.value()
-                cloud_property = self._get_cloud_property(asset_id)
+                cloud_property = self._get_cloud_property(
+                    asset_id, self.ts_cloud_property_input.text().strip()
+                )
                 collection = collection.filter(
                     ee.Filter.lt(cloud_property, cloud_cover)
                 )
