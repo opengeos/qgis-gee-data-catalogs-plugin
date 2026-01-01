@@ -424,9 +424,7 @@ class TimeSeriesLoaderThread(QThread):
                 elif self.frequency == "week":
                     label = f"Week of {date_str}"
                 elif self.frequency == "month":
-                    label = datetime.strptime(date_str, "%Y-%m-%d").strftime(
-                        "%Y-%m"
-                    )
+                    label = datetime.strptime(date_str, "%Y-%m-%d").strftime("%Y-%m")
                 elif self.frequency == "quarter":
                     dt = datetime.strptime(date_str, "%Y-%m-%d")
                     quarter = (dt.month - 1) // 3 + 1
