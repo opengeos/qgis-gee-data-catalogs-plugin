@@ -924,6 +924,12 @@ class CatalogDockWidget(QDockWidget):
                     rect = QgsRectangle(self.startPoint, self.endPoint)
                     if rect.width() > 0 and rect.height() > 0:
                         self.callback(rect)
+                    else:
+                        QMessageBox.warning(
+                            dock_widget,
+                            "Invalid rectangle",
+                            "Please draw a valid rectangle by clicking and dragging on the map.",
+                        )
                 self._hideRubberBand()
 
             def _showRubberBand(self):
