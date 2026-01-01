@@ -1038,7 +1038,9 @@ class CatalogDockWidget(QDockWidget):
         """Convert JavaScript code to Python using geemap's conversion function."""
         js_code = self.conversion_input.toPlainText().strip()
         if not js_code:
-            QMessageBox.warning(self, "Warning", "Please enter JavaScript code to convert.")
+            QMessageBox.warning(
+                self, "Warning", "Please enter JavaScript code to convert."
+            )
             return
 
         try:
@@ -1072,7 +1074,9 @@ class CatalogDockWidget(QDockWidget):
                 "Please install geemap: pip install geemap",
             )
         except Exception as e:
-            QMessageBox.critical(self, "Conversion Error", f"Failed to convert: {str(e)}")
+            QMessageBox.critical(
+                self, "Conversion Error", f"Failed to convert: {str(e)}"
+            )
 
     def _camel_to_snake_methods(self, code: str) -> str:
         """Convert common geemap camelCase methods to snake_case.
