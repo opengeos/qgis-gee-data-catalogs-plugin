@@ -293,10 +293,19 @@ class GeeDataCatalogs:
             # Refresh all EE layers
             refreshed = refresh_all_ee_layers()
 
-            if refreshed > 0:
+            total_ee_layers = len(ee_layers)
+            if refreshed == total_ee_layers and refreshed > 0:
+                # All EE layers refreshed successfully
                 self.iface.messageBar().pushSuccess(
                     "GEE Data Catalogs",
                     f"Refreshed {refreshed} Earth Engine layer(s).",
+                )
+            elif 0 < refreshed < total_ee_layers:
+                # Some EE layers failed to refresh; warn the user about partial success
+                self.iface.messageBar().pushWarning(
+                    "GEE Data Catalogs",
+                    f"Refreshed {refreshed} of {total_ee_layers} Earth Engine layer(s). "
+                    "Some layers may not render correctly and might need manual refresh.",
                 )
 
             # Update inspector if catalog dock is visible
