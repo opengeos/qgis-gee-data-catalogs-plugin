@@ -7,18 +7,22 @@ A comprehensive QGIS plugin for browsing, searching, and loading Google Earth En
 ## Features
 
 - **Dynamic Data Catalog Browser**: Automatically loads datasets from official GEE catalog and community datasets
-  - [Official GEE Catalog](https://github.com/opengeos/Earth-Engine-Catalog) - 780+ datasets
-  - [Awesome GEE Community Datasets](https://github.com/samapriya/awesome-gee-community-datasets) - 4,360+ community datasets
+  - [Official Earth Engine Data Catalog](https://github.com/opengeos/Earth-Engine-Catalog) - 780+ datasets
+  - [Awesome GEE Community Catalog](https://github.com/samapriya/awesome-gee-community-datasets) - 4,360+ community datasets
 - **Search & Filter**: Search datasets by keywords, tags, providers, data types, and sources
 - **Advanced Filtering for ImageCollections**:
   - Date range filtering
   - Bounding box (current map extent)
   - Cloud cover percentage
+- **Time Series**: Create time series layers from ImageCollections
 - **Flexible Image Loading**:
   - Load composite images (mosaic, median, mean, min, max)
   - Select and load individual images from ImageCollections
 - **Code Console**: Write and execute geemap/Earth Engine Python code directly
 - **Visualization Parameters**: Customize with bands, min/max values, and color palettes
+- **Conversion**: Convert Earth Engine JavaScript API to Python API
+- **Inspector**: Inspect Earth Engine layer values at specific locations
+- **Export**: Export Earth Engine layers to various file formats
 - **Multiple Data Types**: Load EE Image, ImageCollection, and FeatureCollection layers
 - **Integration**: Works seamlessly with [qgis-geemap-plugin](https://github.com/opengeos/qgis-geemap-plugin)
 - **Update Checker**: Built-in plugin update checker from GitHub
@@ -29,8 +33,8 @@ The plugin dynamically fetches catalog data from:
 
 | Source | URL | Datasets |
 |--------|-----|----------|
-| Official GEE Catalog | [TSV](https://raw.githubusercontent.com/opengeos/Earth-Engine-Catalog/master/gee_catalog.tsv) / [JSON](https://raw.githubusercontent.com/opengeos/Earth-Engine-Catalog/master/gee_catalog.json) |780+ |
-| Community Datasets | [CSV](https://raw.githubusercontent.com/samapriya/awesome-gee-community-datasets/master/community_datasets.csv) / [JSON](https://raw.githubusercontent.com/samapriya/awesome-gee-community-datasets/master/community_datasets.json) | 4,360+ |
+| Official Earth Engine Data Catalog | [TSV](https://raw.githubusercontent.com/opengeos/Earth-Engine-Catalog/master/gee_catalog.tsv) / [JSON](https://raw.githubusercontent.com/opengeos/Earth-Engine-Catalog/master/gee_catalog.json) |780+ |
+| Awesome GEE Community Catalog | [CSV](https://raw.githubusercontent.com/samapriya/awesome-gee-community-datasets/master/community_datasets.csv) / [JSON](https://raw.githubusercontent.com/samapriya/awesome-gee-community-datasets/master/community_datasets.json) | 4,360+ |
 
 ## Installation
 
@@ -85,7 +89,7 @@ cd geo
 From the `geo` folder:
 
 ```bash
-pixi add qgis geemap
+pixi add qgis geemap xee rioxarray
 ```
 
 #### 4) Authenticate Earth Engine
@@ -143,6 +147,8 @@ Before using the plugin, you need to authenticate with Google Earth Engine:
 2. If not authenticated, run `earthengine authenticate` in your terminal
 3. Set the `EE_PROJECT_ID` environment variable for auto-initialization
 
+![](https://github.com/user-attachments/assets/4d23e72d-1995-436c-9ad2-6fbd1bedcc02)
+
 ### Browse Datasets
 
 1. Click the **Data Catalog** button to open the catalog panel
@@ -151,12 +157,28 @@ Before using the plugin, you need to authenticate with Google Earth Engine:
 4. Click on a dataset to view its information
 5. Click **Add to Map** to load with default visualization
 
+![](https://github.com/user-attachments/assets/f4deada0-21bb-4b05-8b2a-7b69a1c21f90)
+
 ### Search Datasets
 
 1. Go to the **Search** tab
 2. Enter keywords in the search box
 3. Filter by category, data type, or source
 4. Double-click a result to add it to the map
+
+![](https://github.com/user-attachments/assets/9c0f0eca-c232-41bc-bc86-03364b238eda)
+
+### Time Series
+
+1. Go to the **Time Series** tab
+2. Enter the dataset Asset ID
+3. Set the date range and optional filters
+4. Choose a frequency (e.g., month, year)
+5. Choose a reducer (e.g., mean, median)
+5. Click **Create Time Series** to create a time series layer
+6. Click **Next** or **Previous** to navigate through the time series
+
+![](https://github.com/user-attachments/assets/4def57a8-083d-49de-ad35-b54904928681)
 
 ### Load with Custom Parameters
 
@@ -172,27 +194,24 @@ Before using the plugin, you need to authenticate with Google Earth Engine:
 5. Set visualization parameters
 6. Click **Load Dataset**
 
+![](https://github.com/user-attachments/assets/75e0d1da-3848-4394-9832-8f484ba22231)
+
 ### Code Console
 
 1. Go to the **Code** tab
-2. Write Python/geemap code using standard geemap syntax
-3. Click **Run Code** to execute
+2. Write Python code using the standard Earth Engine Python API and geemap syntax
+3. Click **Run Code** to execute the code
 
-Example:
-```python
-import ee
-import geemap
+![](https://github.com/user-attachments/assets/a394f9cb-be5c-42d3-93cd-84bc4f8bba7c)
 
-m = geemap.Map()
+### Conversion
 
-# Load Sentinel-2 imagery
-s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')\
-    .filterDate('2023-01-01', '2023-06-01')\
-    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))\
-    .median()
+1. Go to the **Conversion** tab
+2. Select an input layer
+3. Choose the conversion type (Image, ImageCollection, or FeatureCollection)
+4. Configure the output options
 
-m.add_layer(s2, {'bands': ['B4', 'B3', 'B2'], 'min': 0, 'max': 3000}, 'Sentinel-2')
-```
+![](https://github.com/user-attachments/assets/2d408de7-419c-4647-a689-923bdc470631)
 
 ### Inspector
 
@@ -202,6 +221,18 @@ m.add_layer(s2, {'bands': ['B4', 'B3', 'B2'], 'min': 0, 'max': 3000}, 'Sentinel-
 4. Click the **Clear** button to clear the inspector
 5. Click the **Refresh Layers** button to refresh the layers
 
+![](https://github.com/user-attachments/assets/db0868e8-73de-4384-9ce3-b1f3d005cc7e)
+
+### Export
+
+1. Go to the **Export** tab
+2. Select an EE layer to export
+3. Choose the export region (map extent, vector bounds, drawn, or custom)
+4. Set export options (scale, CRS, and format)
+5. Choose an output file or leave it blank for a temporary export
+6. Click **Export**
+
+![](https://github.com/user-attachments/assets/aa069953-aa6b-467f-990f-5f0f69da7f8d)
 
 ### Notes
 
@@ -235,6 +266,8 @@ Access settings via the **Settings** toolbar button:
 - **General**: Auto-initialization, notifications, default category
 - **Earth Engine**: Project ID, default filters, performance options
 - **Display**: Layer opacity, visualization defaults
+
+![](https://github.com/user-attachments/assets/f4914220-e5e7-48a8-af6b-0b59b0f677ba)
 
 ## Development
 
