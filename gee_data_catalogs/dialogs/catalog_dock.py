@@ -2151,7 +2151,13 @@ class CatalogDockWidget(QDockWidget):
         try:
             import geemap as real_geemap
 
-            for attr in ["ee_initialize", "basemaps", "coreutils", "__version__"]:
+            for attr in [
+                "ee_initialize",
+                "basemaps",
+                "coreutils",
+                "__version__",
+                "create_timeseries",
+            ]:
                 if hasattr(real_geemap, attr):
                     setattr(patched_geemap, attr, getattr(real_geemap, attr))
         except ImportError:
@@ -2218,7 +2224,13 @@ class CatalogDockWidget(QDockWidget):
             try:
                 import geemap as real_geemap
 
-                for attr in ["ee_initialize", "basemaps", "coreutils", "__version__"]:
+                for attr in [
+                    "ee_initialize",
+                    "basemaps",
+                    "coreutils",
+                    "__version__",
+                    "create_timeseries",
+                ]:
                     if hasattr(real_geemap, attr):
                         setattr(patched_geemap, attr, getattr(real_geemap, attr))
             except ImportError:
@@ -3580,7 +3592,13 @@ class CatalogDockWidget(QDockWidget):
             try:
                 import geemap as real_geemap
 
-                for attr in ["ee_initialize", "basemaps", "coreutils", "__version__"]:
+                for attr in [
+                    "ee_initialize",
+                    "basemaps",
+                    "coreutils",
+                    "__version__",
+                    "create_timeseries",
+                ]:
                     if hasattr(real_geemap, attr):
                         setattr(patched_geemap, attr, getattr(real_geemap, attr))
             except ImportError:
@@ -3813,6 +3831,74 @@ class CatalogDockWidget(QDockWidget):
                 layer = QgsRasterLayer(uri, basemap, "wms")
                 if layer.isValid():
                     QgsProject.instance().addMapLayer(layer, True)
+
+            def add_time_slider(
+                self,
+                ee_object,
+                vis_params=None,
+                region=None,
+                layer_name="Time series",
+                labels=None,
+                time_interval=1,
+                position="bottomright",
+                slider_length="150px",
+                date_format="YYYY-MM-dd",
+                opacity=1.0,
+                **kwargs,
+            ):
+                """Add a time series as individual layers.
+
+                Note: QGIS doesn't support interactive sliders like Jupyter.
+                Images are added as separate layers that can be toggled.
+                """
+                import ee
+                from ..core.ee_utils import add_ee_layer
+
+                if vis_params is None:
+                    vis_params = {}
+
+                # Convert to list if it's an ImageCollection
+                if isinstance(ee_object, ee.ImageCollection):
+                    # Get the list of images
+                    img_list = ee_object.toList(ee_object.size())
+                    count = ee_object.size().getInfo()
+
+                    # Limit to reasonable number of layers
+                    max_layers = min(count, 20)
+
+                    # Get date labels if not provided
+                    if labels is None:
+                        try:
+                            dates = ee_object.aggregate_array(
+                                "system:time_start"
+                            ).getInfo()
+                            from datetime import datetime
+
+                            labels = []
+                            for ts in dates[:max_layers]:
+                                if ts:
+                                    dt = datetime.fromtimestamp(ts / 1000)
+                                    labels.append(dt.strftime("%Y-%m-%d"))
+                                else:
+                                    labels.append(None)
+                        except Exception:
+                            labels = [None] * max_layers
+
+                    # Add each image as a layer
+                    for i in range(max_layers):
+                        img = ee.Image(img_list.get(i))
+                        label = labels[i] if i < len(labels) and labels[i] else f"{i+1}"
+                        name = f"{layer_name} - {label}"
+                        # Only show the last layer by default
+                        shown = i == max_layers - 1
+                        add_ee_layer(img, vis_params, name, shown, opacity)
+
+                    print(
+                        f"Added {max_layers} time series layers. Toggle visibility in the Layers panel."
+                    )
+                else:
+                    # Single image, just add it
+                    add_ee_layer(ee_object, vis_params, layer_name, True, opacity)
 
             def __repr__(self):
                 return "QGISMap()"
