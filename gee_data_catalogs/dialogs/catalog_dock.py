@@ -3167,6 +3167,8 @@ class CatalogDockWidget(QDockWidget):
 
     def _on_export_finished(self, output_path):
         """Handle successful export completion."""
+        import os
+
         self._stop_export_progress()
         self.export_btn.setEnabled(True)
         self.export_status_label.setText(f"Exported to: {output_path}")
@@ -3180,15 +3182,14 @@ class CatalogDockWidget(QDockWidget):
             QMessageBox.Yes | QMessageBox.No,
         )
         if reply == QMessageBox.Yes:
+            layer_name = os.path.splitext(os.path.basename(output_path))[0]
             if output_path.lower().endswith(".tif"):
                 from qgis.core import QgsRasterLayer
 
-                layer_name = output_path.split("/")[-1].replace(".tif", "")
                 layer = QgsRasterLayer(output_path, layer_name)
             else:
                 from qgis.core import QgsVectorLayer
 
-                layer_name = output_path.split("/")[-1].split(".")[0]
                 layer = QgsVectorLayer(output_path, layer_name, "ogr")
 
             if layer.isValid():
@@ -3249,6 +3250,7 @@ class CatalogDockWidget(QDockWidget):
             output_path: Output file path
         """
         import sys
+        import os
 
         try:
             import xarray as xr
@@ -3380,7 +3382,7 @@ class CatalogDockWidget(QDockWidget):
         if reply == QMessageBox.Yes:
             from qgis.core import QgsRasterLayer
 
-            layer_name = output_path.split("/")[-1].replace(".tif", "")
+            layer_name = os.path.splitext(os.path.basename(output_path))[0]
             layer = QgsRasterLayer(output_path, layer_name)
             if layer.isValid():
                 QgsProject.instance().addMapLayer(layer)
@@ -3393,6 +3395,8 @@ class CatalogDockWidget(QDockWidget):
             region: ee.Geometry for filtering features
             output_path: Output file path
         """
+        import os
+
         self.export_status_label.setText("Filtering features by region...")
         QApplication.processEvents()
 
@@ -3486,7 +3490,7 @@ class CatalogDockWidget(QDockWidget):
             from qgis.core import QgsVectorLayer
 
             layer = QgsVectorLayer(
-                output_path, output_path.split("/")[-1].split(".")[0], "ogr"
+                output_path, os.path.splitext(os.path.basename(output_path))[0], "ogr"
             )
             if layer.isValid():
                 QgsProject.instance().addMapLayer(layer)
