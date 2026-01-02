@@ -4413,13 +4413,15 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
             try:
                 vis_params["min"] = float(vis_min_text)
             except ValueError:
-                # Ignore invalid numeric input; leave "min" unset so default behavior applies.
+            except ValueError:
+                # Invalid numeric input: leave 'min' unset so default visualization is used.
                 pass
 
         if vis_max_text:
             try:
                 vis_params["max"] = float(vis_max_text)
             except ValueError:
+                # Invalid numeric input: leave 'max' unset so default visualization is used.
                 # Ignore invalid numeric input; leave "max" unset so default behavior applies.
                 pass
 
