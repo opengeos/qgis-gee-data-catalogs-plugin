@@ -39,6 +39,7 @@ from qgis.PyQt.QtWidgets import (
     QRadioButton,
     QButtonGroup,
     QSlider,
+    QFileDialog,
 )
 from qgis.PyQt.QtGui import QFont, QCursor
 from qgis.core import QgsProject, QgsRectangle, QgsMessageLog, Qgis
@@ -548,6 +549,234 @@ class InspectorWorker(QThread):
             self.error.emit(str(e))
 
 
+class ExportWorkerThread(QThread):
+    """Thread for exporting Earth Engine data in background."""
+
+    finished = pyqtSignal(str)  # output_path
+    error = pyqtSignal(str)
+    progress = pyqtSignal(str)
+
+    def __init__(
+        self,
+        export_type: str,  # "image" or "features"
+        ee_object,
+        region,
+        output_path: str,
+        scale: int = 30,
+        crs: str = "EPSG:3857",
+        vector_format: str = "GeoJSON",
+    ):
+        super().__init__()
+        self.export_type = export_type
+        self.ee_object = ee_object
+        self.region = region
+        self.output_path = output_path
+        self.scale = scale
+        self.crs = crs
+        self.vector_format = vector_format
+
+    def run(self):
+        try:
+            if self.export_type == "image":
+                self._export_image()
+            else:
+                self._export_features()
+        except Exception as e:
+            import traceback
+
+            self.error.emit(f"{str(e)}\n\n{traceback.format_exc()}")
+
+    def _export_image(self):
+        """Export an ee.Image or ee.ImageCollection as COG."""
+        import sys
+        import ee
+
+        try:
+            import xarray as xr
+            import xee
+        except ImportError as e:
+            raise ImportError(
+                f"Required packages not available: {e}\n"
+                "Please install xarray and xee: pip install xarray xee"
+            )
+
+        self.progress.emit("Opening dataset with xee...")
+
+        # Convert ImageCollection to Image if needed
+        ee_object = self.ee_object
+        type_name = type(ee_object).__name__
+        if isinstance(ee_object, ee.ImageCollection) or type_name == "ImageCollection":
+            ee_object = ee_object.mosaic()
+
+        # Clip to region
+        ee_object = ee_object.clip(self.region)
+
+        # Open with xee
+        ds = xr.open_dataset(
+            ee_object,
+            engine=xee.EarthEngineBackendEntrypoint,
+            crs=self.crs,
+            scale=self.scale,
+            geometry=self.region,
+        )
+
+        self.progress.emit("Processing dataset...")
+
+        # Ensure output has .tif extension
+        output_path = self.output_path
+        if not output_path.lower().endswith(".tif"):
+            output_path += ".tif"
+
+        # Write as COG using rioxarray
+        try:
+            import rioxarray  # noqa: F401
+        except ImportError:
+            raise ImportError(
+                "rioxarray is required for COG export.\n"
+                "Please install it: pip install rioxarray"
+            )
+
+        # Handle xee dimension naming for rioxarray
+        rename_dims = {}
+        for old_x in ["X", "lon", "longitude"]:
+            if old_x in ds.dims:
+                rename_dims[old_x] = "x"
+                break
+        for old_y in ["Y", "lat", "latitude"]:
+            if old_y in ds.dims:
+                rename_dims[old_y] = "y"
+                break
+        if rename_dims:
+            ds = ds.rename(rename_dims)
+
+        # Drop time dimension if present
+        if "time" in ds.dims:
+            ds = ds.isel(time=0)
+
+        # Verify spatial dims exist
+        if "x" not in ds.dims or "y" not in ds.dims:
+            raise ValueError(
+                f"Could not find spatial dimensions. Available dims: {list(ds.dims)}"
+            )
+
+        # Set CRS and spatial dims
+        ds = ds.rio.write_crs(self.crs)
+        ds = ds.rio.set_spatial_dims(x_dim="x", y_dim="y")
+
+        # Get data variables
+        data_vars = list(ds.data_vars)
+        if not data_vars:
+            raise ValueError("No data variables found in the dataset")
+
+        self.progress.emit("Writing COG file...")
+
+        # Export to COG
+        if len(data_vars) > 1:
+            import numpy as np
+
+            arrays = []
+            for var in data_vars:
+                da = ds[var]
+                if da.dims != ("y", "x"):
+                    da = da.transpose("y", "x")
+                arrays.append(da.values)
+
+            stacked = np.stack(arrays, axis=0)
+
+            da = xr.DataArray(
+                stacked,
+                dims=["band", "y", "x"],
+                coords={
+                    "band": list(range(1, len(data_vars) + 1)),
+                    "y": ds.y,
+                    "x": ds.x,
+                },
+            )
+            da = da.rio.write_crs(self.crs)
+            da = da.rio.set_spatial_dims(x_dim="x", y_dim="y")
+            da.rio.to_raster(output_path, driver="COG")
+        else:
+            da = ds[data_vars[0]]
+            if da.dims != ("y", "x"):
+                da = da.transpose("y", "x")
+            da.rio.to_raster(output_path, driver="COG")
+
+        self.finished.emit(output_path)
+
+    def _export_features(self):
+        """Export an ee.FeatureCollection or ee.Feature."""
+        import ee
+
+        self.progress.emit("Filtering features by region...")
+
+        # Convert Feature to FeatureCollection if needed
+        ee_object = self.ee_object
+        type_name = type(ee_object).__name__
+        if isinstance(ee_object, ee.Feature) or type_name == "Feature":
+            ee_object = ee.FeatureCollection([ee_object])
+
+        # Filter by region
+        ee_object = ee_object.filterBounds(self.region)
+
+        self.progress.emit("Fetching features from Earth Engine...")
+
+        # Format mapping
+        format_map = {
+            "GeoJSON": ("GeoJSON", ".geojson"),
+            "GPKG (GeoPackage)": ("GPKG", ".gpkg"),
+            "ESRI Shapefile": ("ESRI Shapefile", ".shp"),
+            "FlatGeobuf": ("FlatGeobuf", ".fgb"),
+            "Parquet (GeoParquet)": ("Parquet", ".parquet"),
+            "GeoJSONSeq": ("GeoJSONSeq", ".geojsonl"),
+            "CSV": ("CSV", ".csv"),
+            "KML": ("KML", ".kml"),
+            "GML": ("GML", ".gml"),
+        }
+
+        driver, ext = format_map.get(self.vector_format, ("GeoJSON", ".geojson"))
+
+        output_path = self.output_path
+        if not output_path.lower().endswith(ext):
+            output_path += ext
+
+        try:
+            import geopandas as gpd
+        except ImportError:
+            raise ImportError(
+                "geopandas is required for vector export.\n"
+                "Please install it: pip install geopandas"
+            )
+
+        try:
+            gdf = ee.data.computeFeatures(
+                {
+                    "expression": ee_object,
+                    "fileFormat": "GEOPANDAS_GEODATAFRAME",
+                }
+            )
+        except Exception:
+            self.progress.emit("Fetching features (fallback method)...")
+            result = ee_object.getInfo()
+            if "features" in result:
+                gdf = gpd.GeoDataFrame.from_features(result["features"])
+            else:
+                raise RuntimeError("Failed to get features from Earth Engine")
+
+        if gdf.crs is None:
+            gdf = gdf.set_crs("EPSG:4326")
+
+        self.progress.emit("Writing output file...")
+
+        if self.vector_format == "GeoJSON":
+            gdf.to_file(output_path, driver="GeoJSON")
+        elif driver == "Parquet":
+            gdf.to_parquet(output_path)
+        else:
+            gdf.to_file(output_path, driver=driver)
+
+        self.finished.emit(output_path)
+
+
 class InspectorMapTool:
     """Map tool for clicking to inspect Earth Engine data."""
 
@@ -711,6 +940,10 @@ class CatalogDockWidget(QDockWidget):
         # Inspector tab
         inspector_tab = self._create_inspector_tab()
         self.tab_widget.addTab(inspector_tab, "Inspector")
+
+        # Export tab
+        export_tab = self._create_export_tab()
+        self.tab_widget.addTab(export_tab, "Export")
 
         # Progress bar
         self.progress_bar = QProgressBar()
@@ -1978,7 +2211,9 @@ class CatalogDockWidget(QDockWidget):
 
         import json
         import os
+        import os
         import tempfile
+        import uuid
         import time
         from urllib.request import urlopen, Request
         from urllib.error import URLError
@@ -2352,11 +2587,918 @@ class CatalogDockWidget(QDockWidget):
 
         return widget
 
+    def _create_export_tab(self):
+        """Create the Export tab for exporting Earth Engine data."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        # Instructions
+        instructions = QLabel(
+            "Export Earth Engine layers to local files.\n"
+            "• Images: Export as Cloud Optimized GeoTIFF (COG) using xee\n"
+            "• FeatureCollections: Export as GeoJSON, Shapefile, or GeoPackage"
+        )
+        instructions.setWordWrap(True)
+        instructions.setStyleSheet("color: gray; font-size: 11px;")
+        layout.addWidget(instructions)
+
+        # Layer selection group
+        layer_group = QGroupBox("Select Layer")
+        layer_layout = QVBoxLayout(layer_group)
+
+        # Layer dropdown
+        layer_combo_layout = QHBoxLayout()
+        layer_combo_layout.addWidget(QLabel("EE Layer:"))
+        self.export_layer_combo = QComboBox()
+        self.export_layer_combo.setMinimumWidth(200)
+        self.export_layer_combo.currentIndexChanged.connect(
+            self._on_export_layer_changed
+        )
+        layer_combo_layout.addWidget(self.export_layer_combo, 1)
+
+        refresh_layers_btn = QPushButton("↻")
+        refresh_layers_btn.setToolTip("Refresh layer list")
+        refresh_layers_btn.setMaximumWidth(30)
+        refresh_layers_btn.clicked.connect(self._refresh_export_layers)
+        layer_combo_layout.addWidget(refresh_layers_btn)
+
+        layer_layout.addLayout(layer_combo_layout)
+
+        # Layer type indicator
+        self.export_layer_type_label = QLabel("Layer type: --")
+        self.export_layer_type_label.setStyleSheet("color: gray; font-size: 10px;")
+        layer_layout.addWidget(self.export_layer_type_label)
+
+        layout.addWidget(layer_group)
+
+        # Region selection group
+        region_group = QGroupBox("Export Region")
+        region_layout = QVBoxLayout(region_group)
+
+        self.export_region_btn_group = QButtonGroup(self)
+
+        # Map extent option
+        self.export_map_extent_radio = QRadioButton("Use current map extent")
+        self.export_map_extent_radio.setChecked(True)
+        self.export_region_btn_group.addButton(self.export_map_extent_radio, 0)
+        region_layout.addWidget(self.export_map_extent_radio)
+
+        # Vector layer option
+        vector_layout = QHBoxLayout()
+        self.export_vector_radio = QRadioButton("Use vector layer bounds:")
+        self.export_region_btn_group.addButton(self.export_vector_radio, 1)
+        vector_layout.addWidget(self.export_vector_radio)
+
+        self.export_vector_combo = QComboBox()
+        self.export_vector_combo.setEnabled(False)
+        vector_layout.addWidget(self.export_vector_combo, 1)
+        region_layout.addLayout(vector_layout)
+
+        # Connect radio button to enable/disable vector combo
+        self.export_vector_radio.toggled.connect(
+            lambda checked: self.export_vector_combo.setEnabled(checked)
+        )
+
+        # Draw bounding box option
+        draw_layout = QHBoxLayout()
+        self.export_draw_radio = QRadioButton("Draw bounding box on map")
+        self.export_region_btn_group.addButton(self.export_draw_radio, 2)
+        draw_layout.addWidget(self.export_draw_radio)
+
+        self.export_draw_btn = QPushButton("Draw")
+        self.export_draw_btn.setEnabled(False)
+        self.export_draw_btn.setMaximumWidth(60)
+        self.export_draw_btn.clicked.connect(self._start_draw_export_bbox)
+        draw_layout.addWidget(self.export_draw_btn)
+
+        self.export_drawn_bounds_label = QLabel("")
+        self.export_drawn_bounds_label.setStyleSheet("color: gray; font-size: 9px;")
+        draw_layout.addWidget(self.export_drawn_bounds_label, 1)
+        region_layout.addLayout(draw_layout)
+
+        self.export_draw_radio.toggled.connect(
+            lambda checked: self.export_draw_btn.setEnabled(checked)
+        )
+
+        # Store drawn bounds
+        self._export_drawn_bounds = None
+
+        # Custom bounds option
+        custom_layout = QHBoxLayout()
+        self.export_custom_radio = QRadioButton("Custom bounds (W,S,E,N):")
+        self.export_region_btn_group.addButton(self.export_custom_radio, 3)
+        custom_layout.addWidget(self.export_custom_radio)
+
+        self.export_bounds_edit = QLineEdit()
+        self.export_bounds_edit.setPlaceholderText("-180,-90,180,90")
+        self.export_bounds_edit.setEnabled(False)
+        custom_layout.addWidget(self.export_bounds_edit, 1)
+        region_layout.addLayout(custom_layout)
+
+        self.export_custom_radio.toggled.connect(
+            lambda checked: self.export_bounds_edit.setEnabled(checked)
+        )
+
+        layout.addWidget(region_group)
+
+        # Export options group
+        options_group = QGroupBox("Export Options")
+        options_layout = QFormLayout(options_group)
+
+        # Scale (for images)
+        self.export_scale_spin = QSpinBox()
+        self.export_scale_spin.setRange(1, 10000)
+        self.export_scale_spin.setValue(30)
+        self.export_scale_spin.setSuffix(" m")
+        options_layout.addRow("Scale:", self.export_scale_spin)
+
+        # CRS
+        self.export_crs_edit = QLineEdit("EPSG:3857")
+        options_layout.addRow("CRS:", self.export_crs_edit)
+
+        # Output format (for FeatureCollections)
+        self.export_format_combo = QComboBox()
+        # Common vector formats supported by GeoPandas/pyogrio
+        self.export_format_combo.addItems(
+            [
+                "GeoJSON",
+                "GPKG (GeoPackage)",
+                "ESRI Shapefile",
+                "FlatGeobuf",
+                "Parquet (GeoParquet)",
+                "GeoJSONSeq",
+                "CSV",
+                "KML",
+                "GML",
+            ]
+        )
+        options_layout.addRow("Vector Format:", self.export_format_combo)
+
+        layout.addWidget(options_group)
+
+        # Output file selection
+        output_group = QGroupBox("Output File")
+        output_layout = QHBoxLayout(output_group)
+
+        self.export_output_edit = QLineEdit()
+        self.export_output_edit.setPlaceholderText("Select output file...")
+        output_layout.addWidget(self.export_output_edit, 1)
+
+        browse_btn = QPushButton("Browse...")
+        browse_btn.clicked.connect(self._browse_export_output)
+        output_layout.addWidget(browse_btn)
+
+        layout.addWidget(output_group)
+
+        # Export button
+        btn_layout = QHBoxLayout()
+        self.export_btn = QPushButton("Export")
+        self.export_btn.clicked.connect(self._do_export)
+        self.export_btn.setStyleSheet("font-weight: bold;")
+        btn_layout.addWidget(self.export_btn)
+
+        layout.addLayout(btn_layout)
+
+        # Progress bar
+        self.export_progress_bar = QProgressBar()
+        self.export_progress_bar.setVisible(False)
+        layout.addWidget(self.export_progress_bar)
+
+        # Status label
+        self.export_status_label = QLabel("Select a layer to export.")
+        self.export_status_label.setWordWrap(True)
+        self.export_status_label.setStyleSheet("color: gray; font-size: 10px;")
+        layout.addWidget(self.export_status_label)
+
+        # Add stretch to push everything up
+        layout.addStretch()
+
+        # Initialize layer lists
+        self._refresh_export_layers()
+        self._refresh_vector_layers()
+
+        return widget
+
+    def _refresh_export_layers(self):
+        """Refresh the list of EE layers available for export."""
+        from ..core.ee_utils import get_ee_layers
+
+        self.export_layer_combo.clear()
+        ee_layers = get_ee_layers()
+
+        if not ee_layers:
+            self.export_layer_combo.addItem("-- No EE layers loaded --")
+            self.export_layer_type_label.setText("Layer type: --")
+            return
+
+        for name in ee_layers.keys():
+            self.export_layer_combo.addItem(name)
+
+        self._on_export_layer_changed(0)
+
+    def _refresh_vector_layers(self):
+        """Refresh the list of vector layers for bounds selection."""
+        self.export_vector_combo.clear()
+
+        for layer in QgsProject.instance().mapLayers().values():
+            if layer.type() == layer.VectorLayer:
+                self.export_vector_combo.addItem(layer.name(), layer.id())
+
+    def _on_export_layer_changed(self, index):
+        """Handle export layer selection change."""
+        from ..core.ee_utils import get_ee_layers
+
+        layer_name = self.export_layer_combo.currentText()
+        if layer_name.startswith("--"):
+            self.export_layer_type_label.setText("Layer type: --")
+            return
+
+        # Reset output file path when layer changes
+        self.export_output_edit.clear()
+
+        ee_layers = get_ee_layers()
+        if layer_name in ee_layers:
+            ee_object, vis_params = ee_layers[layer_name]
+
+            # Check type using class name as fallback for lazy ee objects
+            type_name = type(ee_object).__name__
+            is_image = isinstance(ee_object, ee.Image) or type_name == "Image"
+            is_image_collection = (
+                isinstance(ee_object, ee.ImageCollection)
+                or type_name == "ImageCollection"
+            )
+            is_feature_collection = (
+                isinstance(ee_object, ee.FeatureCollection)
+                or type_name == "FeatureCollection"
+            )
+            is_feature = isinstance(ee_object, ee.Feature) or type_name == "Feature"
+
+            if is_image:
+                self.export_layer_type_label.setText("Layer type: ee.Image")
+                self.export_format_combo.setEnabled(False)
+                self.export_scale_spin.setEnabled(True)
+            elif is_image_collection:
+                self.export_layer_type_label.setText(
+                    "Layer type: ee.ImageCollection (will mosaic)"
+                )
+                self.export_format_combo.setEnabled(False)
+                self.export_scale_spin.setEnabled(True)
+            elif is_feature_collection:
+                self.export_layer_type_label.setText("Layer type: ee.FeatureCollection")
+                self.export_format_combo.setEnabled(True)
+                self.export_scale_spin.setEnabled(False)
+            elif is_feature:
+                self.export_layer_type_label.setText("Layer type: ee.Feature")
+                self.export_format_combo.setEnabled(True)
+                self.export_scale_spin.setEnabled(False)
+            else:
+                # Default: enable both options for unknown types
+                self.export_layer_type_label.setText(f"Layer type: {type_name}")
+                self.export_format_combo.setEnabled(True)
+                self.export_scale_spin.setEnabled(True)
+
+    def _browse_export_output(self):
+        """Open file dialog to select output file."""
+        from ..core.ee_utils import get_ee_layers
+
+        layer_name = self.export_layer_combo.currentText()
+        ee_layers = get_ee_layers()
+
+        # Format to file filter and extension mapping
+        format_info = {
+            "GeoJSON": ("GeoJSON (*.geojson);;All Files (*)", ".geojson"),
+            "GPKG (GeoPackage)": ("GeoPackage (*.gpkg);;All Files (*)", ".gpkg"),
+            "ESRI Shapefile": ("Shapefile (*.shp);;All Files (*)", ".shp"),
+            "FlatGeobuf": ("FlatGeobuf (*.fgb);;All Files (*)", ".fgb"),
+            "Parquet (GeoParquet)": (
+                "GeoParquet (*.parquet);;All Files (*)",
+                ".parquet",
+            ),
+            "GeoJSONSeq": ("GeoJSON Sequence (*.geojsonl);;All Files (*)", ".geojsonl"),
+            "CSV": ("CSV (*.csv);;All Files (*)", ".csv"),
+            "KML": ("KML (*.kml);;All Files (*)", ".kml"),
+            "GML": ("GML (*.gml);;All Files (*)", ".gml"),
+        }
+
+        file_path = ""
+        expected_ext = ""
+
+        if layer_name in ee_layers:
+            ee_object, _ = ee_layers[layer_name]
+            type_name = type(ee_object).__name__
+            is_image = isinstance(
+                ee_object, (ee.Image, ee.ImageCollection)
+            ) or type_name in ("Image", "ImageCollection")
+
+            if is_image:
+                file_path, _ = QFileDialog.getSaveFileName(
+                    self,
+                    "Save Image As",
+                    "",
+                    "Cloud Optimized GeoTIFF (*.tif);;All Files (*)",
+                )
+                expected_ext = ".tif"
+            else:
+                fmt = self.export_format_combo.currentText()
+                filter_str, expected_ext = format_info.get(fmt, ("All Files (*)", ""))
+                file_path, _ = QFileDialog.getSaveFileName(
+                    self, "Save As", "", filter_str
+                )
+        else:
+            file_path, _ = QFileDialog.getSaveFileName(
+                self, "Save As", "", "All Files (*)"
+            )
+
+        if file_path:
+            # Auto-add extension if not present
+            if expected_ext and not file_path.lower().endswith(expected_ext):
+                file_path += expected_ext
+            self.export_output_edit.setText(file_path)
+
+    def _get_export_region(self):
+        """Get the export region as an ee.Geometry.
+
+        Returns:
+            ee.Geometry.Rectangle or None if error.
+        """
+        region_type = self.export_region_btn_group.checkedId()
+
+        if region_type == 0:  # Map extent
+            bounds = self._get_map_extent_wgs84()
+            if bounds:
+                return ee.Geometry.Rectangle(bounds)
+            else:
+                QMessageBox.warning(self, "Error", "Could not get map extent.")
+                return None
+
+        elif region_type == 1:  # Vector layer
+            layer_id = self.export_vector_combo.currentData()
+            if not layer_id:
+                QMessageBox.warning(self, "Error", "No vector layer selected.")
+                return None
+
+            layer = QgsProject.instance().mapLayer(layer_id)
+            if not layer:
+                QMessageBox.warning(self, "Error", "Vector layer not found.")
+                return None
+
+            from qgis.core import QgsCoordinateReferenceSystem, QgsCoordinateTransform
+
+            extent = layer.extent()
+            layer_crs = layer.crs()
+            wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
+
+            if layer_crs.authid() != "EPSG:4326":
+                transform = QgsCoordinateTransform(
+                    layer_crs, wgs84, QgsProject.instance()
+                )
+                extent = transform.transformBoundingBox(extent)
+
+            bounds = [
+                extent.xMinimum(),
+                extent.yMinimum(),
+                extent.xMaximum(),
+                extent.yMaximum(),
+            ]
+            return ee.Geometry.Rectangle(bounds)
+
+        elif region_type == 2:  # Draw bounding box
+            if self._export_drawn_bounds is None:
+                QMessageBox.warning(
+                    self, "Error", "Please draw a bounding box on the map first."
+                )
+                return None
+            return ee.Geometry.Rectangle(self._export_drawn_bounds)
+
+        elif region_type == 3:  # Custom bounds
+            bounds_text = self.export_bounds_edit.text().strip()
+            try:
+                parts = [float(x.strip()) for x in bounds_text.split(",")]
+                if len(parts) != 4:
+                    raise ValueError("Need exactly 4 values")
+                return ee.Geometry.Rectangle(parts)
+            except Exception as e:
+                QMessageBox.warning(
+                    self,
+                    "Error",
+                    f"Invalid bounds format: {e}\nUse: West,South,East,North",
+                )
+                return None
+
+        return None
+
+    def _start_draw_export_bbox(self):
+        """Start the bounding box drawing tool."""
+        from qgis.gui import QgsMapToolEmitPoint, QgsRubberBand
+        from qgis.core import (
+            QgsWkbTypes,
+            QgsCoordinateReferenceSystem,
+            QgsCoordinateTransform,
+        )
+
+        canvas = self.iface.mapCanvas()
+
+        # Create a rubber band for visual feedback
+        self._export_rubber_band = QgsRubberBand(canvas, QgsWkbTypes.PolygonGeometry)
+        self._export_rubber_band.setColor(Qt.red)
+        self._export_rubber_band.setWidth(2)
+        self._export_rubber_band.setFillColor(Qt.transparent)
+
+        # Store start point
+        self._export_bbox_start = None
+
+        class BBoxMapTool(QgsMapToolEmitPoint):
+            def __init__(tool_self, canvas, dock):
+                super().__init__(canvas)
+                tool_self.dock = dock
+                tool_self.start_point = None
+                tool_self.end_point = None
+                tool_self.is_drawing = False
+
+            def canvasPressEvent(tool_self, event):
+                tool_self.start_point = tool_self.toMapCoordinates(event.pos())
+                tool_self.is_drawing = True
+                tool_self.dock._export_rubber_band.reset(QgsWkbTypes.PolygonGeometry)
+
+            def canvasMoveEvent(tool_self, event):
+                if not tool_self.is_drawing:
+                    return
+                tool_self.end_point = tool_self.toMapCoordinates(event.pos())
+                tool_self.dock._update_export_rubber_band(
+                    tool_self.start_point, tool_self.end_point
+                )
+
+            def canvasReleaseEvent(tool_self, event):
+                if not tool_self.is_drawing:
+                    return
+                tool_self.is_drawing = False
+                tool_self.end_point = tool_self.toMapCoordinates(event.pos())
+
+                # Convert to WGS84
+                map_crs = canvas.mapSettings().destinationCrs()
+                wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
+
+                if map_crs.authid() != "EPSG:4326":
+                    transform = QgsCoordinateTransform(
+                        map_crs, wgs84, QgsProject.instance()
+                    )
+                    start_wgs84 = transform.transform(tool_self.start_point)
+                    end_wgs84 = transform.transform(tool_self.end_point)
+                else:
+                    start_wgs84 = tool_self.start_point
+                    end_wgs84 = tool_self.end_point
+
+                # Store bounds as [west, south, east, north]
+                west = min(start_wgs84.x(), end_wgs84.x())
+                east = max(start_wgs84.x(), end_wgs84.x())
+                south = min(start_wgs84.y(), end_wgs84.y())
+                north = max(start_wgs84.y(), end_wgs84.y())
+
+                tool_self.dock._export_drawn_bounds = [west, south, east, north]
+                tool_self.dock.export_drawn_bounds_label.setText(
+                    f"({west:.4f}, {south:.4f}, {east:.4f}, {north:.4f})"
+                )
+
+                # Clean up
+                tool_self.dock._export_rubber_band.reset()
+                canvas.unsetMapTool(tool_self)
+                tool_self.dock._show_success("Bounding box drawn")
+
+        self._export_bbox_tool = BBoxMapTool(canvas, self)
+        canvas.setMapTool(self._export_bbox_tool)
+        self.export_status_label.setText(
+            "Click and drag on the map to draw a bounding box..."
+        )
+
+    def _update_export_rubber_band(self, start_point, end_point):
+        """Update the rubber band rectangle during drawing."""
+        from qgis.core import QgsPointXY, QgsGeometry
+
+        # Create rectangle points
+        points = [
+            QgsPointXY(start_point.x(), start_point.y()),
+            QgsPointXY(end_point.x(), start_point.y()),
+            QgsPointXY(end_point.x(), end_point.y()),
+            QgsPointXY(start_point.x(), end_point.y()),
+            QgsPointXY(start_point.x(), start_point.y()),
+        ]
+
+        self._export_rubber_band.setToGeometry(
+            QgsGeometry.fromPolygonXY([points]), None
+        )
+
+    def _do_export(self):
+        """Perform the export operation using a background thread."""
+        from ..core.ee_utils import get_ee_layers
+
+        layer_name = self.export_layer_combo.currentText()
+        if layer_name.startswith("--"):
+            QMessageBox.warning(self, "Error", "Please select a valid EE layer.")
+            return
+
+        ee_layers = get_ee_layers()
+        if layer_name not in ee_layers:
+            QMessageBox.warning(self, "Error", "Layer not found in registry.")
+            return
+
+        ee_object, vis_params = ee_layers[layer_name]
+
+        # Get region
+        region = self._get_export_region()
+        if region is None:
+            return
+
+        # Get options
+        scale = self.export_scale_spin.value()
+        crs = self.export_crs_edit.text().strip() or "EPSG:3857"
+        vector_format = self.export_format_combo.currentText()
+
+        # Determine export type
+        type_name = type(ee_object).__name__
+        is_image = isinstance(ee_object, ee.Image) or type_name == "Image"
+        is_image_collection = (
+            isinstance(ee_object, ee.ImageCollection) or type_name == "ImageCollection"
+        )
+        is_feature_collection = (
+            isinstance(ee_object, ee.FeatureCollection)
+            or type_name == "FeatureCollection"
+        )
+        is_feature = isinstance(ee_object, ee.Feature) or type_name == "Feature"
+
+        if is_image or is_image_collection:
+            export_type = "image"
+        elif is_feature_collection or is_feature:
+            export_type = "features"
+        else:
+            QMessageBox.warning(self, "Error", f"Unsupported object type: {type_name}")
+            return
+
+        output_path = self.export_output_edit.text().strip()
+        if not output_path:
+            output_path = self._generate_temp_export_path(
+                export_type=export_type, vector_format=vector_format
+            )
+            self.export_output_edit.setText(output_path)
+
+        # Show progress
+        self._start_export_progress()
+        self.export_status_label.setText("Starting export...")
+        self.export_status_label.setStyleSheet("color: gray; font-size: 10px;")
+        self.export_btn.setEnabled(False)
+
+        # Create and start worker thread
+        self._export_thread = ExportWorkerThread(
+            export_type=export_type,
+            ee_object=ee_object,
+            region=region,
+            output_path=output_path,
+            scale=scale,
+            crs=crs,
+            vector_format=vector_format,
+        )
+        self._export_thread.finished.connect(self._on_export_finished)
+        self._export_thread.error.connect(self._on_export_error)
+        self._export_thread.progress.connect(self._on_export_progress)
+        self._export_thread.start()
+
+    def _on_export_progress(self, message):
+        """Handle export progress updates."""
+        self.export_status_label.setText(message)
+
+    def _on_export_finished(self, output_path):
+        """Handle successful export completion."""
+        self._stop_export_progress()
+        self.export_btn.setEnabled(True)
+        self.export_status_label.setText(f"Exported to: {output_path}")
+        self.export_status_label.setStyleSheet("color: green; font-size: 10px;")
+
+        # Ask if user wants to add to map
+        reply = QMessageBox.question(
+            self,
+            "Export Complete",
+            f"Export successful!\n{output_path}\n\nAdd layer to map?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            if output_path.lower().endswith(".tif"):
+                from qgis.core import QgsRasterLayer
+
+                layer_name = output_path.split("/")[-1].replace(".tif", "")
+                layer = QgsRasterLayer(output_path, layer_name)
+            else:
+                from qgis.core import QgsVectorLayer
+
+                layer_name = output_path.split("/")[-1].split(".")[0]
+                layer = QgsVectorLayer(output_path, layer_name, "ogr")
+
+            if layer.isValid():
+                QgsProject.instance().addMapLayer(layer)
+
+    def _on_export_error(self, error_message):
+        """Handle export error."""
+        self._stop_export_progress()
+        self.export_btn.setEnabled(True)
+        self.export_status_label.setText("Export failed!")
+        self.export_status_label.setStyleSheet("color: red; font-size: 10px;")
+        QMessageBox.critical(self, "Export Error", f"Export failed:\n{error_message}")
+
+    def _start_export_progress(self):
+        """Start an indeterminate progress indicator for export."""
+        self.export_progress_bar.setVisible(True)
+        self.export_progress_bar.setRange(0, 0)
+
+    def _stop_export_progress(self):
+        """Stop the export progress animation."""
+        self.export_progress_bar.setVisible(False)
+
+    def _generate_temp_export_path(self, export_type: str, vector_format: str) -> str:
+        """Generate a temporary output path when the user does not choose one."""
+        import os
+        import tempfile
+        import uuid
+
+        format_map = {
+            "GeoJSON": ".geojson",
+            "GPKG (GeoPackage)": ".gpkg",
+            "ESRI Shapefile": ".shp",
+            "FlatGeobuf": ".fgb",
+            "Parquet (GeoParquet)": ".parquet",
+            "GeoJSONSeq": ".geojsonl",
+            "CSV": ".csv",
+            "KML": ".kml",
+            "GML": ".gml",
+        }
+
+        if export_type == "image":
+            suffix = ".tif"
+        else:
+            suffix = format_map.get(vector_format, ".geojson")
+
+        temp_dir = tempfile.gettempdir()
+        filename = f"gee_export_{uuid.uuid4().hex}{suffix}"
+        return os.path.join(temp_dir, filename)
+
+    def _export_image(self, ee_object, region, scale, crs, output_path):
+        """Export an ee.Image or ee.ImageCollection as COG using xee.
+
+        Args:
+            ee_object: ee.Image or ee.ImageCollection
+            region: ee.Geometry for export bounds
+            scale: Resolution in meters
+            crs: Coordinate reference system string
+            output_path: Output file path
+        """
+        import sys
+
+        try:
+            import xarray as xr
+            import xee
+        except ImportError as e:
+            raise ImportError(
+                f"Required packages not available: {e}\n"
+                "Please install xarray and xee: pip install xarray xee"
+            )
+
+        self.export_status_label.setText("Opening dataset with xee...")
+        QApplication.processEvents()
+
+        # Convert ImageCollection to Image if needed
+        if isinstance(ee_object, ee.ImageCollection):
+            ee_object = ee_object.mosaic()
+
+        # Clip to region
+        ee_object = ee_object.clip(region)
+
+        # Open with xee
+        ds = xr.open_dataset(
+            ee_object,
+            engine=xee.EarthEngineBackendEntrypoint,
+            crs=crs,
+            scale=scale,
+            geometry=region,
+        )
+
+        self.export_status_label.setText("Processing dataset...")
+        QApplication.processEvents()
+
+        # Ensure output has .tif extension
+        if not output_path.lower().endswith(".tif"):
+            output_path += ".tif"
+
+        # Write as COG using rioxarray
+        try:
+            import rioxarray  # noqa: F401
+        except ImportError:
+            raise ImportError(
+                "rioxarray is required for COG export.\n"
+                "Please install it: pip install rioxarray"
+            )
+
+        # Handle xee dimension naming for rioxarray
+        # xee may use 'X'/'Y', 'lon'/'lat', or 'x'/'y' depending on version
+        rename_dims = {}
+        for old_x in ["X", "lon", "longitude"]:
+            if old_x in ds.dims:
+                rename_dims[old_x] = "x"
+                break
+        for old_y in ["Y", "lat", "latitude"]:
+            if old_y in ds.dims:
+                rename_dims[old_y] = "y"
+                break
+        if rename_dims:
+            ds = ds.rename(rename_dims)
+
+        # Drop time dimension if present (take first time slice)
+        if "time" in ds.dims:
+            ds = ds.isel(time=0)
+
+        # Verify spatial dims exist
+        if "x" not in ds.dims or "y" not in ds.dims:
+            raise ValueError(
+                f"Could not find spatial dimensions. Available dims: {list(ds.dims)}"
+            )
+
+        # Set CRS
+        ds = ds.rio.write_crs(crs)
+
+        # Set spatial dims explicitly
+        ds = ds.rio.set_spatial_dims(x_dim="x", y_dim="y")
+
+        # Get data variables to export
+        data_vars = list(ds.data_vars)
+        if not data_vars:
+            raise ValueError("No data variables found in the dataset")
+
+        self.export_status_label.setText("Writing COG file...")
+        QApplication.processEvents()
+
+        # Export to COG
+        if len(data_vars) > 1:
+            # Stack multiple variables as bands
+            import numpy as np
+
+            # Get arrays and transpose each to (y, x) order
+            arrays = []
+            for var in data_vars:
+                da = ds[var]
+                if da.dims != ("y", "x"):
+                    da = da.transpose("y", "x")
+                arrays.append(da.values)
+
+            stacked = np.stack(arrays, axis=0)
+
+            # Create a new DataArray with band dimension
+            da = xr.DataArray(
+                stacked,
+                dims=["band", "y", "x"],
+                coords={
+                    "band": list(range(1, len(data_vars) + 1)),
+                    "y": ds.y,
+                    "x": ds.x,
+                },
+            )
+            da = da.rio.write_crs(crs)
+            da = da.rio.set_spatial_dims(x_dim="x", y_dim="y")
+            da.rio.to_raster(output_path, driver="COG")
+        else:
+            # Get the data array and transpose to (y, x) order for rioxarray
+            da = ds[data_vars[0]]
+            if da.dims != ("y", "x"):
+                da = da.transpose("y", "x")
+            da.rio.to_raster(output_path, driver="COG")
+
+        self.export_status_label.setText(f"Exported to: {output_path}")
+        self.export_status_label.setStyleSheet("color: green; font-size: 10px;")
+
+        # Ask if user wants to add to map
+        reply = QMessageBox.question(
+            self,
+            "Export Complete",
+            f"Image exported successfully to:\n{output_path}\n\nAdd layer to map?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            from qgis.core import QgsRasterLayer
+
+            layer_name = output_path.split("/")[-1].replace(".tif", "")
+            layer = QgsRasterLayer(output_path, layer_name)
+            if layer.isValid():
+                QgsProject.instance().addMapLayer(layer)
+
+    def _export_features(self, ee_object, region, output_path):
+        """Export an ee.FeatureCollection or ee.Feature using ee.data.computeFeatures.
+
+        Args:
+            ee_object: ee.FeatureCollection or ee.Feature
+            region: ee.Geometry for filtering features
+            output_path: Output file path
+        """
+        self.export_status_label.setText("Filtering features by region...")
+        QApplication.processEvents()
+
+        # Convert Feature to FeatureCollection if needed
+        type_name = type(ee_object).__name__
+        if isinstance(ee_object, ee.Feature) or type_name == "Feature":
+            ee_object = ee.FeatureCollection([ee_object])
+
+        # Filter by region
+        ee_object = ee_object.filterBounds(region)
+
+        self.export_status_label.setText("Fetching features from Earth Engine...")
+        QApplication.processEvents()
+
+        # Get the selected format
+        fmt = self.export_format_combo.currentText()
+
+        # Format mapping: display name -> (driver, extension)
+        format_map = {
+            "GeoJSON": ("GeoJSON", ".geojson"),
+            "GPKG (GeoPackage)": ("GPKG", ".gpkg"),
+            "ESRI Shapefile": ("ESRI Shapefile", ".shp"),
+            "FlatGeobuf": ("FlatGeobuf", ".fgb"),
+            "Parquet (GeoParquet)": ("Parquet", ".parquet"),
+            "GeoJSONSeq": ("GeoJSONSeq", ".geojsonl"),
+            "CSV": ("CSV", ".csv"),
+            "KML": ("KML", ".kml"),
+            "GML": ("GML", ".gml"),
+        }
+
+        driver, ext = format_map.get(fmt, ("GeoJSON", ".geojson"))
+
+        # Ensure correct extension
+        if not output_path.lower().endswith(ext):
+            output_path += ext
+
+        # Try to use ee.data.computeFeatures with GEOPANDAS_GEODATAFRAME first
+        # Fall back to getInfo() if that fails
+        try:
+            import geopandas as gpd
+        except ImportError:
+            raise ImportError(
+                "geopandas is required for vector export.\n"
+                "Please install it: pip install geopandas"
+            )
+
+        try:
+            # Try using computeFeatures with GeoDataFrame output (faster for large datasets)
+            gdf = ee.data.computeFeatures(
+                {
+                    "expression": ee_object,
+                    "fileFormat": "GEOPANDAS_GEODATAFRAME",
+                }
+            )
+        except Exception:
+            # Fall back to getInfo() method
+            self.export_status_label.setText("Fetching features (fallback method)...")
+            QApplication.processEvents()
+            result = ee_object.getInfo()
+            if "features" in result:
+                gdf = gpd.GeoDataFrame.from_features(result["features"])
+            else:
+                raise RuntimeError("Failed to get features from Earth Engine")
+
+        # Set CRS if not already set
+        if gdf.crs is None:
+            gdf = gdf.set_crs("EPSG:4326")
+
+        self.export_status_label.setText("Writing output file...")
+        QApplication.processEvents()
+
+        # Export based on format
+        if fmt == "GeoJSON":
+            gdf.to_file(output_path, driver="GeoJSON")
+        elif driver == "Parquet":
+            gdf.to_parquet(output_path)
+        else:
+            gdf.to_file(output_path, driver=driver)
+
+        self.export_status_label.setText(f"Exported to: {output_path}")
+        self.export_status_label.setStyleSheet("color: green; font-size: 10px;")
+
+        # Ask if user wants to add to map
+        reply = QMessageBox.question(
+            self,
+            "Export Complete",
+            f"Features exported successfully to:\n{output_path}\n\nAdd layer to map?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            from qgis.core import QgsVectorLayer
+
+            layer = QgsVectorLayer(
+                output_path, output_path.split("/")[-1].split(".")[0], "ogr"
+            )
+            if layer.isValid():
+                QgsProject.instance().addMapLayer(layer)
+
     def _on_tab_changed(self, index):
         """Handle tab changes."""
         # Refresh layer count when switching to Inspector tab (index 6 after adding Time Series tab)
         if index == 6:  # Inspector tab
             self._refresh_inspector_layers()
+        elif index == 7:  # Export tab
+            self._refresh_export_layers()
+            self._refresh_vector_layers()
 
     def _toggle_image_selection(self, checked):
         """Toggle visibility of image selection widgets."""
