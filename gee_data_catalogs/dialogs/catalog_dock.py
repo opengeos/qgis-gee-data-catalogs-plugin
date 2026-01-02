@@ -4728,6 +4728,7 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
                 vis_parts.append(f"'min': {float(vis_min)}")
                 vis_parts.append(f"'max': {float(vis_max)}")
             except ValueError:
+                # If min/max are not valid numbers, omit them from vis_params.
                 pass
 
         palette = self.ts_palette_input.text().strip()
