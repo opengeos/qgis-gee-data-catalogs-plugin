@@ -3000,7 +3000,7 @@ class CatalogDockWidget(QDockWidget):
         pixel_band_layout = QFormLayout()
         self.pixel_bands_input = QLineEdit()
         self.pixel_bands_input.setPlaceholderText(
-            "e.g., NDVI,EVI or leave empty for all bands"
+            "NDVI, EVI, B1 (comma-separated) or leave empty for all bands"
         )
         self.pixel_bands_input.setToolTip(
             "Comma-separated list of band names to extract.\n"
