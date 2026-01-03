@@ -122,20 +122,31 @@ class SettingsDockWidget(QDockWidget):
         self.notifications_check.setChecked(True)
         general_layout.addRow("Show notifications:", self.notifications_check)
 
-        # Default category
+        # Default category (aligned with official GEE categories)
         self.default_category = QComboBox()
         self.default_category.addItems(
             [
-                "Landsat",
-                "Sentinel",
-                "MODIS",
-                "Elevation",
-                "Land Cover",
-                "Climate & Weather",
-                "Boundaries",
-                "Night Lights",
+                "Agriculture",
+                "Atmosphere",
+                "Climate",
+                "Cryosphere",
+                "Ecosystems",
+                "Elevation & Topography",
+                "Fire",
+                "Forest & Biomass",
+                "Infrastructure & Boundaries",
+                "Land Use & Land Cover",
+                "Oceans",
+                "Orthophotos",
+                "Plant Productivity",
                 "Population",
-                "Water",
+                "Precipitation",
+                "Satellite Imagery",
+                "Soil",
+                "Surface & Ground Water",
+                "Vegetation Indices",
+                "Water Vapor",
+                "Other",
             ]
         )
         general_layout.addRow("Default category:", self.default_category)
