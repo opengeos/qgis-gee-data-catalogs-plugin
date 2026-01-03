@@ -2,6 +2,7 @@
 
 A comprehensive QGIS plugin for browsing, searching, and loading Google Earth Engine data catalogs directly in QGIS.
 
+[![QGIS Plugin](https://img.shields.io/badge/QGIS-Plugin-green.svg)](https://plugins.qgis.org/plugins/gee_data_catalogs)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## Features
