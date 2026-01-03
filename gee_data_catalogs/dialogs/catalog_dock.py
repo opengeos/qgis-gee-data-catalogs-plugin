@@ -2982,7 +2982,7 @@ class CatalogDockWidget(QDockWidget):
         self.pixel_inspector_btn.clicked.connect(self._toggle_pixel_inspector)
         inspector_btn_layout.addWidget(self.pixel_inspector_btn)
 
-        self.pixel_clear_btn = QPushButton("Clear Marker")
+        self.pixel_clear_btn = QPushButton("Clear All Markers")
         self.pixel_clear_btn.clicked.connect(self._clear_pixel_inspector)
         inspector_btn_layout.addWidget(self.pixel_clear_btn)
 
