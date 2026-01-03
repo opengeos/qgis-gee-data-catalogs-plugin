@@ -16,6 +16,7 @@ A comprehensive QGIS plugin for browsing, searching, and loading Google Earth En
   - Bounding box (current map extent)
   - Cloud cover percentage
 - **Time Series**: Create time series layers from ImageCollections
+- **Pixel Time Series Inspector**: Click on the map to extract and chart time series at a point (similar to Earth Engine's `ui.Chart.image.series`)
 - **Flexible Image Loading**:
   - Load composite images (mosaic, median, mean, min, max)
   - Select and load individual images from ImageCollections
@@ -187,6 +188,26 @@ Before using the plugin, you need to authenticate with Google Earth Engine:
 6. Click **Next** or **Previous** to navigate through the time series
 
 ![](https://github.com/user-attachments/assets/4def57a8-083d-49de-ad35-b54904928681)
+
+### Pixel Time Series Inspector
+
+The **Pixel Time Series Inspector** allows you to interactively click on the map and extract time series data at that point location, similar to Earth Engine's `ui.Chart.image.series` functionality.
+
+1. Go to the **Time Series** tab
+2. Enter the dataset Asset ID and configure date range/filters
+3. Scroll down to the **Pixel Time Series Inspector** section
+4. Click **Start Pixel Inspector** to activate the map click tool
+5. Click anywhere on the map to select a pixel location
+6. (Optional) Specify bands to extract and set the scale (resolution)
+7. Click **Extract & Chart** to:
+   - Extract pixel values for each image in the collection
+   - Display an interactive chart with the time series
+8. In the chart dialog:
+   - Select/deselect bands to display
+   - Toggle data points, grid, and line connections
+   - View statistics (min, max, mean, std) for each band
+   - Export data to CSV, JSON, or PNG
+   - Copy data to clipboard
 
 ### Load with Custom Parameters
 

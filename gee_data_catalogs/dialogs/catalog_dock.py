@@ -342,7 +342,7 @@ class TimeSeriesLoaderThread(QThread):
             # Apply region filter if provided
             region = None
             if self.region:
-                region = ee.Geometry.Rectangle(self.region)
+                region = ee.Geometry.Rectangle(self.region, geodesic=False)
                 collection = collection.filterBounds(region)
 
             # Apply cloud filter if provided
@@ -777,6 +777,1197 @@ class ExportWorkerThread(QThread):
         self.finished.emit(output_path)
 
 
+class PixelTimeSeriesWorker(QThread):
+    """Thread for extracting time series data at a point location."""
+
+    finished = pyqtSignal(dict)  # {dates: [], values: {band: []}, metadata: {}}
+    error = pyqtSignal(str)
+    progress = pyqtSignal(str)
+
+    def __init__(
+        self,
+        asset_id: str,
+        lon: float,
+        lat: float,
+        start_date: str,
+        end_date: str,
+        bands: list = None,
+        scale: int = 30,
+        cloud_cover: int = None,
+        cloud_property: str = "CLOUDY_PIXEL_PERCENTAGE",
+        reducer: str = "first",  # How to handle multiple images on same day
+    ):
+        super().__init__()
+        self.asset_id = asset_id
+        self.lon = lon
+        self.lat = lat
+        self.start_date = start_date
+        self.end_date = end_date
+        self.bands = bands
+        self.scale = scale
+        self.cloud_cover = cloud_cover
+        self.cloud_property = cloud_property
+        self.reducer = reducer
+
+    def run(self):
+        try:
+            import ee
+            from datetime import datetime
+
+            self.progress.emit(f"Loading collection: {self.asset_id}")
+
+            # Create point geometry with a small buffer for reliable sampling
+            point = ee.Geometry.Point([self.lon, self.lat])
+
+            # Load and filter collection
+            collection = ee.ImageCollection(self.asset_id)
+            collection = collection.filterDate(self.start_date, self.end_date)
+            collection = collection.filterBounds(point)
+
+            # Apply cloud filter if specified
+            if self.cloud_cover is not None:
+                collection = collection.filter(
+                    ee.Filter.lt(self.cloud_property, self.cloud_cover)
+                )
+
+            # Get band names from first image BEFORE selecting bands
+            first_image = collection.first()
+            all_band_names = first_image.bandNames().getInfo()
+
+            # Select bands if specified, otherwise use all bands
+            if self.bands and len(self.bands) > 0:
+                # Validate bands exist
+                valid_bands = [b for b in self.bands if b in all_band_names]
+                if not valid_bands:
+                    self.error.emit(
+                        f"None of the specified bands ({', '.join(self.bands)}) exist in the collection.\n"
+                        f"Available bands: {', '.join(all_band_names)}"
+                    )
+                    return
+                collection = collection.select(valid_bands)
+                band_names = valid_bands
+            else:
+                band_names = all_band_names
+
+            # Get collection size
+            size = collection.size().getInfo()
+            if size == 0:
+                self.error.emit(
+                    "No images found for the specified location and date range."
+                )
+                return
+
+            self.progress.emit(
+                f"Found {size} images. Extracting pixel values for {len(band_names)} band(s)..."
+            )
+
+            # Sort by time
+            collection = collection.sort("system:time_start")
+
+            # Use reduceRegion for reliable point extraction that handles nodata gracefully
+            scale = self.scale
+
+            def extract_values(image):
+                """Extract pixel values and date from an image using reduceRegion."""
+                # Use reduceRegion which handles nodata gracefully
+                values = image.reduceRegion(
+                    reducer=ee.Reducer.first(),
+                    geometry=point,
+                    scale=scale,
+                    maxPixels=100,  # Allow some buffer for edge cases
+                )
+
+                # Get date info
+                date = image.date().format("YYYY-MM-dd")
+                timestamp = image.date().millis()
+
+                return ee.Feature(
+                    None, {"date": date, "timestamp": timestamp, "values": values}
+                )
+
+            # Map over collection to extract values
+            features = collection.map(extract_values)
+
+            # Get all features as a list
+            self.progress.emit("Fetching time series data from Earth Engine...")
+            feature_list = features.getInfo()
+
+            if not feature_list or "features" not in feature_list:
+                self.error.emit("Failed to extract time series data.")
+                return
+
+            # Parse results
+            dates = []
+            timestamps = []
+            values_by_band = {band: [] for band in band_names}
+
+            for feature in feature_list["features"]:
+                props = feature.get("properties", {})
+                date_str = props.get("date", "")
+                timestamp = props.get("timestamp", 0)
+                values = props.get("values", {})
+
+                dates.append(date_str)
+                timestamps.append(timestamp)
+
+                for band in band_names:
+                    val = values.get(band)
+                    values_by_band[band].append(val)
+
+            self.progress.emit(f"Extracted {len(dates)} data points.")
+
+            result = {
+                "dates": dates,
+                "timestamps": timestamps,
+                "values": values_by_band,
+                "bands": band_names,
+                "metadata": {
+                    "asset_id": self.asset_id,
+                    "lon": self.lon,
+                    "lat": self.lat,
+                    "start_date": self.start_date,
+                    "end_date": self.end_date,
+                    "scale": self.scale,
+                    "num_images": len(dates),
+                },
+            }
+
+            self.finished.emit(result)
+
+        except Exception as e:
+            import traceback
+
+            self.error.emit(f"{str(e)}\n{traceback.format_exc()}")
+
+
+class TimeSeriesChartDialog(QWidget):
+    """Dialog for displaying interactive time series charts."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Time Series Chart")
+        self.setMinimumSize(800, 600)
+        self.setWindowFlags(Qt.Window)
+
+        self._data = None
+        self._multi_data = {}  # Dict mapping location_id to data
+        self._locations = []  # List of (lon, lat, id, color) tuples
+        self._is_multi_location = False
+        self._setup_ui()
+
+    def _setup_ui(self):
+        """Set up the chart dialog UI."""
+        layout = QVBoxLayout(self)
+
+        # Header with location info
+        self.header_label = QLabel("Time Series at Location")
+        self.header_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        layout.addWidget(self.header_label)
+
+        # Band selection
+        band_layout = QHBoxLayout()
+        band_layout.addWidget(QLabel("Select Bands:"))
+        self.band_list = QListWidget()
+        self.band_list.setSelectionMode(QListWidget.MultiSelection)
+        self.band_list.setMaximumHeight(100)
+        self.band_list.itemSelectionChanged.connect(self._update_chart)
+        band_layout.addWidget(self.band_list)
+        layout.addLayout(band_layout)
+
+        # Chart options
+        options_layout = QHBoxLayout()
+
+        self.show_points_check = QCheckBox("Show data points")
+        self.show_points_check.setChecked(True)
+        self.show_points_check.stateChanged.connect(self._update_chart)
+        options_layout.addWidget(self.show_points_check)
+
+        self.show_grid_check = QCheckBox("Show grid")
+        self.show_grid_check.setChecked(True)
+        self.show_grid_check.stateChanged.connect(self._update_chart)
+        options_layout.addWidget(self.show_grid_check)
+
+        self.interpolate_check = QCheckBox("Connect points")
+        self.interpolate_check.setChecked(True)
+        self.interpolate_check.stateChanged.connect(self._update_chart)
+        options_layout.addWidget(self.interpolate_check)
+
+        self.stack_lines_check = QCheckBox("Stack lines (subplots)")
+        self.stack_lines_check.setChecked(False)
+        self.stack_lines_check.stateChanged.connect(self._update_chart)
+        self.stack_lines_check.setToolTip(
+            "When checked, each band is shown in a separate subplot.\n"
+            "When unchecked, all bands are overlaid on the same plot."
+        )
+        options_layout.addWidget(self.stack_lines_check)
+
+        options_layout.addStretch()
+        layout.addLayout(options_layout)
+
+        # Chart area - try to use matplotlib if available
+        self.chart_widget = QWidget()
+        self.chart_layout = QVBoxLayout(self.chart_widget)
+        self.chart_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Create matplotlib canvas or fallback to text display
+        try:
+            from matplotlib.backends.backend_qt5agg import (
+                FigureCanvasQTAgg as FigureCanvas,
+            )
+            from matplotlib.backends.backend_qt5agg import (
+                NavigationToolbar2QT as NavigationToolbar,
+            )
+            from matplotlib.figure import Figure
+
+            self.figure = Figure(figsize=(10, 6), dpi=100)
+            self.canvas = FigureCanvas(self.figure)
+            self.toolbar = NavigationToolbar(self.canvas, self)
+
+            self.chart_layout.addWidget(self.toolbar)
+            self.chart_layout.addWidget(self.canvas)
+            self._has_matplotlib = True
+        except ImportError:
+            self._has_matplotlib = False
+            self.text_display = QTextEdit()
+            self.text_display.setReadOnly(True)
+            self.chart_layout.addWidget(self.text_display)
+
+        layout.addWidget(self.chart_widget, 1)
+
+        # Statistics display
+        stats_group = QGroupBox("Statistics")
+        stats_layout = QVBoxLayout(stats_group)
+        self.stats_text = QTextBrowser()
+        self.stats_text.setMaximumHeight(120)
+        stats_layout.addWidget(self.stats_text)
+        layout.addWidget(stats_group)
+
+        # Export buttons
+        export_layout = QHBoxLayout()
+
+        self.export_csv_btn = QPushButton("📄 Export to CSV")
+        self.export_csv_btn.clicked.connect(self._export_csv)
+        export_layout.addWidget(self.export_csv_btn)
+
+        self.export_json_btn = QPushButton("📋 Export to JSON")
+        self.export_json_btn.clicked.connect(self._export_json)
+        export_layout.addWidget(self.export_json_btn)
+
+        self.export_geojson_btn = QPushButton("🌍 Export to GeoJSON")
+        self.export_geojson_btn.clicked.connect(self._export_geojson)
+        export_layout.addWidget(self.export_geojson_btn)
+
+        if self._has_matplotlib:
+            self.export_png_btn = QPushButton("🖼 Save Chart as PNG")
+            self.export_png_btn.clicked.connect(self._export_png)
+            export_layout.addWidget(self.export_png_btn)
+
+        self.copy_btn = QPushButton("📋 Copy Data")
+        self.copy_btn.clicked.connect(self._copy_data)
+        export_layout.addWidget(self.copy_btn)
+
+        export_layout.addStretch()
+
+        self.close_btn = QPushButton("Close")
+        self.close_btn.clicked.connect(self.close)
+        export_layout.addWidget(self.close_btn)
+
+        layout.addLayout(export_layout)
+
+    def set_data(self, data: dict):
+        """Set the time series data and update the chart.
+
+        Args:
+            data: Dictionary with keys:
+                - dates: list of date strings
+                - timestamps: list of timestamps
+                - values: dict mapping band names to lists of values
+                - bands: list of band names
+                - metadata: dict with asset_id, lon, lat, etc.
+        """
+        self._data = data
+        self._is_multi_location = False
+
+        # Update header
+        metadata = data.get("metadata", {})
+        lon = metadata.get("lon", 0)
+        lat = metadata.get("lat", 0)
+        asset_id = metadata.get("asset_id", "Unknown")
+        self.header_label.setText(
+            f"Time Series at ({lon:.6f}, {lat:.6f})\n" f"Dataset: {asset_id}"
+        )
+
+        # Populate band list
+        self.band_list.clear()
+        bands = data.get("bands", [])
+        for band in bands:
+            item = QListWidgetItem(band)
+            self.band_list.addItem(item)
+            item.setSelected(True)  # Select all bands by default
+
+        self._update_chart()
+        self._update_stats()
+
+    def set_multi_location_data(self, multi_data: dict, locations: list):
+        """Set time series data for multiple locations.
+
+        Args:
+            multi_data: Dictionary mapping location_id to data dicts
+            locations: List of (lon, lat, id, QColor) tuples
+        """
+        self._multi_data = multi_data
+        self._locations = locations
+        self._is_multi_location = True
+
+        # Use the first location's data for single-location reference
+        if multi_data:
+            first_key = list(multi_data.keys())[0]
+            self._data = multi_data[first_key]
+
+        # Update header
+        num_locations = len(multi_data)
+        if multi_data:
+            first_data = list(multi_data.values())[0]
+            asset_id = first_data.get("metadata", {}).get("asset_id", "Unknown")
+            self.header_label.setText(
+                f"Time Series Comparison ({num_locations} location{'s' if num_locations != 1 else ''})\n"
+                f"Dataset: {asset_id}"
+            )
+
+        # Populate band list from first location
+        self.band_list.clear()
+        if multi_data:
+            first_data = list(multi_data.values())[0]
+            bands = first_data.get("bands", [])
+            for band in bands:
+                item = QListWidgetItem(band)
+                self.band_list.addItem(item)
+                item.setSelected(True)
+
+        self._update_chart()
+        self._update_stats()
+
+    def _get_selected_bands(self):
+        """Get list of selected band names."""
+        return [item.text() for item in self.band_list.selectedItems()]
+
+    def _update_chart(self):
+        """Update the chart with current data and options."""
+        if self._is_multi_location and self._multi_data:
+            self._update_chart_multi_location()
+        elif self._data:
+            selected_bands = self._get_selected_bands()
+            if not selected_bands:
+                return
+
+            dates = self._data.get("dates", [])
+            values = self._data.get("values", {})
+
+            if self._has_matplotlib:
+                self._update_matplotlib_chart(dates, values, selected_bands)
+            else:
+                self._update_text_chart(dates, values, selected_bands)
+
+    def _update_chart_multi_location(self):
+        """Update chart for multiple locations."""
+        if not self._has_matplotlib:
+            return
+
+        selected_bands = self._get_selected_bands()
+        if not selected_bands:
+            return
+
+        from datetime import datetime
+        import matplotlib.pyplot as plt
+        import matplotlib.dates as mdates
+
+        self.figure.clear()
+
+        # Check if stacked (subplots) mode
+        if self.stack_lines_check.isChecked() and len(selected_bands) > 1:
+            # Create subplots for each band
+            num_bands = len(selected_bands)
+            axes = self.figure.subplots(num_bands, 1, sharex=True)
+            if num_bands == 1:
+                axes = [axes]
+
+            for band_idx, (band, ax) in enumerate(zip(selected_bands, axes)):
+                # Plot each location for this band
+                for loc_id, data in self._multi_data.items():
+                    dates = data.get("dates", [])
+                    values = data.get("values", {})
+                    metadata = data.get("metadata", {})
+
+                    # Parse dates
+                    try:
+                        date_objects = [datetime.strptime(d, "%Y-%m-%d") for d in dates]
+                    except Exception:
+                        date_objects = list(range(len(dates)))
+
+                    band_values = values.get(band, [])
+                    if not band_values:
+                        continue
+
+                    # Filter out None values
+                    valid_points = [
+                        (d, v)
+                        for d, v in zip(date_objects, band_values)
+                        if v is not None
+                    ]
+                    if not valid_points:
+                        continue
+
+                    valid_dates, valid_values = zip(*valid_points)
+
+                    # Get color from location
+                    color = data.get("location_color")
+                    if color:
+                        color = (
+                            color.red() / 255,
+                            color.green() / 255,
+                            color.blue() / 255,
+                        )
+                    else:
+                        color = plt.cm.tab10.colors[loc_id % 10]
+
+                    label = f"Loc {loc_id} ({metadata.get('lon', 0):.2f}, {metadata.get('lat', 0):.2f})"
+
+                    if self.interpolate_check.isChecked():
+                        ax.plot(
+                            valid_dates,
+                            valid_values,
+                            "-",
+                            color=color,
+                            label=label,
+                            linewidth=1.5,
+                        )
+
+                    if self.show_points_check.isChecked():
+                        ax.scatter(
+                            valid_dates, valid_values, color=color, s=20, zorder=5
+                        )
+
+                ax.set_ylabel(band, fontsize=9)
+                if self.show_grid_check.isChecked():
+                    ax.grid(True, linestyle="--", alpha=0.7)
+
+            axes[0].legend(loc="upper right", fontsize=8)
+            axes[-1].set_xlabel("Date")
+
+            first_data = list(self._multi_data.values())[0]
+            asset_id = first_data.get("metadata", {}).get("asset_id", "").split("/")[-1]
+            axes[0].set_title(f"Time Series Comparison - {asset_id}")
+
+        else:
+            # Single plot with all bands and locations
+            ax = self.figure.add_subplot(111)
+
+            for loc_id, data in self._multi_data.items():
+                dates = data.get("dates", [])
+                values = data.get("values", {})
+                metadata = data.get("metadata", {})
+
+                # Parse dates
+                try:
+                    date_objects = [datetime.strptime(d, "%Y-%m-%d") for d in dates]
+                except Exception:
+                    date_objects = list(range(len(dates)))
+
+                # Get base color from location
+                base_color = data.get("location_color")
+                if base_color:
+                    base_rgb = (
+                        base_color.red() / 255,
+                        base_color.green() / 255,
+                        base_color.blue() / 255,
+                    )
+                else:
+                    base_rgb = plt.cm.tab10.colors[loc_id % 10]
+
+                for band_idx, band in enumerate(selected_bands):
+                    band_values = values.get(band, [])
+                    if not band_values:
+                        continue
+
+                    # Filter out None values
+                    valid_points = [
+                        (d, v)
+                        for d, v in zip(date_objects, band_values)
+                        if v is not None
+                    ]
+                    if not valid_points:
+                        continue
+
+                    valid_dates, valid_values = zip(*valid_points)
+
+                    # Vary color slightly for different bands at same location
+                    color = base_rgb
+
+                    label = f"Loc {loc_id} - {band}"
+
+                    if self.interpolate_check.isChecked():
+                        linestyle = ["-", "--", ":", "-."][band_idx % 4]
+                        ax.plot(
+                            valid_dates,
+                            valid_values,
+                            linestyle,
+                            color=color,
+                            label=label,
+                            linewidth=1.5,
+                        )
+
+                    if self.show_points_check.isChecked():
+                        ax.scatter(
+                            valid_dates, valid_values, color=color, s=20, zorder=5
+                        )
+
+            ax.set_xlabel("Date")
+            ax.set_ylabel("Value")
+
+            first_data = list(self._multi_data.values())[0]
+            asset_id = first_data.get("metadata", {}).get("asset_id", "").split("/")[-1]
+            ax.set_title(f"Time Series Comparison - {asset_id}")
+
+            if self.show_grid_check.isChecked():
+                ax.grid(True, linestyle="--", alpha=0.7)
+
+            ax.legend(loc="best", fontsize=8)
+
+        # Format x-axis for dates
+        if self._has_matplotlib and self._multi_data:
+            try:
+                self.figure.autofmt_xdate(rotation=45)
+            except Exception:
+                pass
+
+        self.figure.tight_layout()
+        self.canvas.draw()
+
+    def _update_matplotlib_chart(self, dates, values, selected_bands):
+        """Update matplotlib chart."""
+        from datetime import datetime
+        import matplotlib.pyplot as plt
+        import matplotlib.dates as mdates
+        import random
+
+        self.figure.clear()
+
+        # Parse dates
+        try:
+            date_objects = [datetime.strptime(d, "%Y-%m-%d") for d in dates]
+        except Exception:
+            date_objects = list(range(len(dates)))
+
+        metadata = self._data.get("metadata", {})
+        asset_id = metadata.get("asset_id", "").split("/")[-1]
+
+        # Generate random colors for each band
+        random.seed(42)  # Consistent colors across updates
+        colors = []
+        for _ in range(len(selected_bands)):
+            colors.append((random.random(), random.random(), random.random()))
+
+        # Check if stacked (subplots) mode
+        if self.stack_lines_check.isChecked() and len(selected_bands) > 1:
+            # Create subplots for each band
+            num_bands = len(selected_bands)
+            axes = self.figure.subplots(num_bands, 1, sharex=True)
+            if num_bands == 1:
+                axes = [axes]
+
+            for i, (band, ax) in enumerate(zip(selected_bands, axes)):
+                band_values = values.get(band, [])
+                if not band_values:
+                    continue
+
+                # Filter out None values for plotting
+                valid_points = [
+                    (d, v) for d, v in zip(date_objects, band_values) if v is not None
+                ]
+                if not valid_points:
+                    ax.set_ylabel(band)
+                    continue
+
+                valid_dates, valid_values = zip(*valid_points)
+                color = colors[i]
+
+                # Plot line if interpolate is checked
+                if self.interpolate_check.isChecked():
+                    ax.plot(valid_dates, valid_values, "-", color=color, linewidth=1.5)
+
+                # Plot points if show_points is checked
+                if self.show_points_check.isChecked():
+                    ax.scatter(valid_dates, valid_values, color=color, s=20, zorder=5)
+
+                ax.set_ylabel(band, fontsize=9)
+
+                if self.show_grid_check.isChecked():
+                    ax.grid(True, linestyle="--", alpha=0.7)
+
+            # Set common labels
+            axes[-1].set_xlabel("Date")
+            axes[0].set_title(f"Time Series - {asset_id}")
+
+            # Format x-axis for dates
+            if date_objects and isinstance(date_objects[0], datetime):
+                axes[-1].xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+                axes[-1].xaxis.set_major_locator(mdates.AutoDateLocator())
+                self.figure.autofmt_xdate(rotation=45)
+
+        else:
+            # Single plot with all bands overlaid
+            ax = self.figure.add_subplot(111)
+
+            for i, band in enumerate(selected_bands):
+                band_values = values.get(band, [])
+                if not band_values:
+                    continue
+
+                # Filter out None values for plotting
+                valid_points = [
+                    (d, v) for d, v in zip(date_objects, band_values) if v is not None
+                ]
+                if not valid_points:
+                    continue
+
+                valid_dates, valid_values = zip(*valid_points)
+                color = colors[i]
+
+                # Plot line if interpolate is checked
+                if self.interpolate_check.isChecked():
+                    ax.plot(
+                        valid_dates,
+                        valid_values,
+                        "-",
+                        color=color,
+                        label=band,
+                        linewidth=1.5,
+                    )
+
+                # Plot points if show_points is checked
+                if self.show_points_check.isChecked():
+                    ax.scatter(valid_dates, valid_values, color=color, s=30, zorder=5)
+
+            # Configure axes
+            ax.set_xlabel("Date")
+            ax.set_ylabel("Value")
+            ax.set_title(f"Time Series - {asset_id}")
+
+            if self.show_grid_check.isChecked():
+                ax.grid(True, linestyle="--", alpha=0.7)
+
+            # Format x-axis for dates
+            if date_objects and isinstance(date_objects[0], datetime):
+                ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+                ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+                self.figure.autofmt_xdate(rotation=45)
+
+            if selected_bands:
+                ax.legend(loc="best")
+
+        self.figure.tight_layout()
+        self.canvas.draw()
+
+    def _update_text_chart(self, dates, values, selected_bands):
+        """Update text-based chart display (fallback when matplotlib unavailable)."""
+        text = "Time Series Data\n" + "=" * 50 + "\n\n"
+
+        header = "Date\t" + "\t".join(selected_bands)
+        text += header + "\n"
+        text += "-" * len(header) * 2 + "\n"
+
+        for i, date in enumerate(dates):
+            row = date
+            for band in selected_bands:
+                val = values.get(band, [])[i] if i < len(values.get(band, [])) else None
+                if val is not None:
+                    row += f"\t{val:.4f}"
+                else:
+                    row += "\tN/A"
+            text += row + "\n"
+
+        self.text_display.setText(text)
+
+    def _update_stats(self):
+        """Update statistics display."""
+        selected_bands = self._get_selected_bands()
+
+        # Use transparent/inherit colors for dark mode compatibility
+        stats_html = """
+        <style>
+            table { width: 100%; border-collapse: collapse; }
+            th, td { padding: 4px 8px; text-align: left; border-bottom: 1px solid #555; }
+            th { font-weight: bold; }
+        </style>
+        """
+
+        if self._is_multi_location and self._multi_data:
+            # Multi-location stats
+            stats_html += "<table>"
+            stats_html += "<tr><th>Location</th><th>Band</th><th>Min</th><th>Max</th><th>Mean</th><th>Std</th><th>Count</th></tr>"
+
+            for loc_id, data in self._multi_data.items():
+                values = data.get("values", {})
+                metadata = data.get("metadata", {})
+                loc_label = f"Loc {loc_id} ({metadata.get('lon', 0):.2f}, {metadata.get('lat', 0):.2f})"
+
+                for band in selected_bands:
+                    band_values = [v for v in values.get(band, []) if v is not None]
+                    if band_values:
+                        import statistics
+
+                        min_val = min(band_values)
+                        max_val = max(band_values)
+                        mean_val = statistics.mean(band_values)
+                        std_val = (
+                            statistics.stdev(band_values) if len(band_values) > 1 else 0
+                        )
+                        count = len(band_values)
+
+                        stats_html += f"<tr><td>{loc_label}</td><td><b>{band}</b></td>"
+                        stats_html += f"<td>{min_val:.4f}</td>"
+                        stats_html += f"<td>{max_val:.4f}</td>"
+                        stats_html += f"<td>{mean_val:.4f}</td>"
+                        stats_html += f"<td>{std_val:.4f}</td>"
+                        stats_html += f"<td>{count}</td></tr>"
+
+            stats_html += "</table>"
+        elif self._data:
+            # Single location stats
+            values = self._data.get("values", {})
+            stats_html += "<table>"
+            stats_html += "<tr><th>Band</th><th>Min</th><th>Max</th><th>Mean</th><th>Std</th><th>Count</th></tr>"
+
+            for band in selected_bands:
+                band_values = [v for v in values.get(band, []) if v is not None]
+                if band_values:
+                    import statistics
+
+                    min_val = min(band_values)
+                    max_val = max(band_values)
+                    mean_val = statistics.mean(band_values)
+                    std_val = (
+                        statistics.stdev(band_values) if len(band_values) > 1 else 0
+                    )
+                    count = len(band_values)
+
+                    stats_html += f"<tr><td><b>{band}</b></td>"
+                    stats_html += f"<td>{min_val:.4f}</td>"
+                    stats_html += f"<td>{max_val:.4f}</td>"
+                    stats_html += f"<td>{mean_val:.4f}</td>"
+                    stats_html += f"<td>{std_val:.4f}</td>"
+                    stats_html += f"<td>{count}</td></tr>"
+
+            stats_html += "</table>"
+        else:
+            stats_html += "<p>No data available</p>"
+
+        self.stats_text.setHtml(stats_html)
+
+    def _export_csv(self):
+        """Export time series data to CSV file."""
+        if not self._data and not self._multi_data:
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Export to CSV", "", "CSV Files (*.csv)"
+        )
+        if not file_path:
+            return
+
+        if not file_path.lower().endswith(".csv"):
+            file_path += ".csv"
+
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                if self._is_multi_location and self._multi_data:
+                    # Export multi-location data
+                    first_data = list(self._multi_data.values())[0]
+                    bands = first_data.get("bands", [])
+                    metadata = first_data.get("metadata", {})
+
+                    # Write metadata as comments
+                    f.write(f"# Asset ID: {metadata.get('asset_id', '')}\n")
+                    f.write(f"# Number of locations: {len(self._multi_data)}\n")
+                    f.write(
+                        f"# Date Range: {metadata.get('start_date', '')} to {metadata.get('end_date', '')}\n"
+                    )
+                    f.write(f"# Scale: {metadata.get('scale', 30)} meters\n")
+                    f.write("#\n")
+
+                    # Write header with location info
+                    header = ["location_id", "longitude", "latitude", "date"] + bands
+                    f.write(",".join(header) + "\n")
+
+                    # Write data for each location
+                    for loc_id, data in self._multi_data.items():
+                        dates = data.get("dates", [])
+                        values = data.get("values", {})
+                        loc_metadata = data.get("metadata", {})
+                        lon = loc_metadata.get("lon", 0)
+                        lat = loc_metadata.get("lat", 0)
+
+                        for i, date in enumerate(dates):
+                            row = [str(loc_id), f"{lon:.6f}", f"{lat:.6f}", date]
+                            for band in bands:
+                                val = (
+                                    values.get(band, [])[i]
+                                    if i < len(values.get(band, []))
+                                    else ""
+                                )
+                                row.append(str(val) if val is not None else "")
+                            f.write(",".join(row) + "\n")
+                else:
+                    # Export single location data
+                    dates = self._data.get("dates", [])
+                    values = self._data.get("values", {})
+                    bands = self._data.get("bands", [])
+                    metadata = self._data.get("metadata", {})
+
+                    # Write metadata as comments
+                    f.write(f"# Asset ID: {metadata.get('asset_id', '')}\n")
+                    f.write(
+                        f"# Location: ({metadata.get('lon', 0):.6f}, {metadata.get('lat', 0):.6f})\n"
+                    )
+                    f.write(
+                        f"# Date Range: {metadata.get('start_date', '')} to {metadata.get('end_date', '')}\n"
+                    )
+                    f.write(f"# Scale: {metadata.get('scale', 30)} meters\n")
+                    f.write("#\n")
+
+                    # Write header
+                    f.write("date," + ",".join(bands) + "\n")
+
+                    # Write data
+                    for i, date in enumerate(dates):
+                        row = [date]
+                        for band in bands:
+                            val = (
+                                values.get(band, [])[i]
+                                if i < len(values.get(band, []))
+                                else ""
+                            )
+                            row.append(str(val) if val is not None else "")
+                        f.write(",".join(row) + "\n")
+
+            QMessageBox.information(
+                self, "Export Complete", f"Data exported to:\n{file_path}"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", f"Failed to export:\n{str(e)}")
+
+    def _prepare_data_for_json(self, data):
+        """Prepare data for JSON serialization by removing non-serializable objects."""
+        import copy
+
+        clean_data = copy.deepcopy(data)
+
+        # Remove QColor objects
+        if "location_color" in clean_data:
+            color = clean_data["location_color"]
+            if color:
+                clean_data["location_color"] = {
+                    "r": color.red(),
+                    "g": color.green(),
+                    "b": color.blue(),
+                }
+            else:
+                clean_data["location_color"] = None
+
+        return clean_data
+
+    def _export_json(self):
+        """Export time series data to JSON file."""
+        if not self._data and not self._multi_data:
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Export to JSON", "", "JSON Files (*.json)"
+        )
+        if not file_path:
+            return
+
+        if not file_path.lower().endswith(".json"):
+            file_path += ".json"
+
+        try:
+            import json
+
+            if self._is_multi_location and self._multi_data:
+                # Export multi-location data
+                export_data = {
+                    "type": "multi_location_timeseries",
+                    "num_locations": len(self._multi_data),
+                    "locations": {},
+                }
+
+                for loc_id, data in self._multi_data.items():
+                    export_data["locations"][str(loc_id)] = self._prepare_data_for_json(
+                        data
+                    )
+            else:
+                # Export single location data
+                export_data = self._prepare_data_for_json(self._data)
+
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(export_data, f, indent=2)
+
+            QMessageBox.information(
+                self, "Export Complete", f"Data exported to:\n{file_path}"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", f"Failed to export:\n{str(e)}")
+
+    def _export_geojson(self):
+        """Export time series data as GeoJSON with point features."""
+        if not self._data and not self._multi_data:
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Export to GeoJSON", "", "GeoJSON Files (*.geojson)"
+        )
+        if not file_path:
+            return
+
+        if not file_path.lower().endswith(".geojson"):
+            file_path += ".geojson"
+
+        try:
+            import json
+
+            features = []
+
+            if self._is_multi_location and self._multi_data:
+                # Create a feature for each location
+                for loc_id, data in self._multi_data.items():
+                    metadata = data.get("metadata", {})
+                    lon = metadata.get("lon", 0)
+                    lat = metadata.get("lat", 0)
+                    dates = data.get("dates", [])
+                    values = data.get("values", {})
+                    bands = data.get("bands", [])
+
+                    # Create properties with time series data
+                    properties = {
+                        "location_id": loc_id,
+                        "asset_id": metadata.get("asset_id", ""),
+                        "start_date": metadata.get("start_date", ""),
+                        "end_date": metadata.get("end_date", ""),
+                        "scale": metadata.get("scale", 30),
+                        "num_observations": len(dates),
+                        "bands": bands,
+                        "dates": dates,
+                    }
+
+                    # Add band values as arrays
+                    for band in bands:
+                        band_vals = values.get(band, [])
+                        properties[f"values_{band}"] = band_vals
+
+                    # Calculate statistics for each band
+                    for band in bands:
+                        band_vals = [v for v in values.get(band, []) if v is not None]
+                        if band_vals:
+                            import statistics
+
+                            properties[f"stats_{band}_min"] = min(band_vals)
+                            properties[f"stats_{band}_max"] = max(band_vals)
+                            properties[f"stats_{band}_mean"] = statistics.mean(
+                                band_vals
+                            )
+
+                    feature = {
+                        "type": "Feature",
+                        "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                        "properties": properties,
+                    }
+                    features.append(feature)
+            else:
+                # Single location
+                metadata = self._data.get("metadata", {})
+                lon = metadata.get("lon", 0)
+                lat = metadata.get("lat", 0)
+                dates = self._data.get("dates", [])
+                values = self._data.get("values", {})
+                bands = self._data.get("bands", [])
+
+                properties = {
+                    "asset_id": metadata.get("asset_id", ""),
+                    "start_date": metadata.get("start_date", ""),
+                    "end_date": metadata.get("end_date", ""),
+                    "scale": metadata.get("scale", 30),
+                    "num_observations": len(dates),
+                    "bands": bands,
+                    "dates": dates,
+                }
+
+                for band in bands:
+                    band_vals = values.get(band, [])
+                    properties[f"values_{band}"] = band_vals
+
+                for band in bands:
+                    band_vals = [v for v in values.get(band, []) if v is not None]
+                    if band_vals:
+                        import statistics
+
+                        properties[f"stats_{band}_min"] = min(band_vals)
+                        properties[f"stats_{band}_max"] = max(band_vals)
+                        properties[f"stats_{band}_mean"] = statistics.mean(band_vals)
+
+                feature = {
+                    "type": "Feature",
+                    "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                    "properties": properties,
+                }
+                features.append(feature)
+
+            geojson = {"type": "FeatureCollection", "features": features}
+
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(geojson, f, indent=2)
+
+            QMessageBox.information(
+                self, "Export Complete", f"GeoJSON exported to:\n{file_path}"
+            )
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Export Error", f"Failed to export GeoJSON:\n{str(e)}"
+            )
+
+    def _export_png(self):
+        """Export chart to PNG file."""
+        if not self._has_matplotlib:
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Chart as PNG", "", "PNG Files (*.png)"
+        )
+        if not file_path:
+            return
+
+        if not file_path.lower().endswith(".png"):
+            file_path += ".png"
+
+        try:
+            self.figure.savefig(file_path, dpi=150, bbox_inches="tight")
+            QMessageBox.information(
+                self, "Export Complete", f"Chart saved to:\n{file_path}"
+            )
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Export Error", f"Failed to save chart:\n{str(e)}"
+            )
+
+    def _copy_data(self):
+        """Copy time series data to clipboard."""
+        if not self._data and not self._multi_data:
+            return
+
+        if self._is_multi_location and self._multi_data:
+            # Multi-location format
+            first_data = list(self._multi_data.values())[0]
+            bands = first_data.get("bands", [])
+
+            # Header with location info
+            text = "location_id\tlongitude\tlatitude\tdate\t" + "\t".join(bands) + "\n"
+
+            for loc_id, data in self._multi_data.items():
+                dates = data.get("dates", [])
+                values = data.get("values", {})
+                metadata = data.get("metadata", {})
+                lon = metadata.get("lon", 0)
+                lat = metadata.get("lat", 0)
+
+                for i, date in enumerate(dates):
+                    row = [str(loc_id), f"{lon:.6f}", f"{lat:.6f}", date]
+                    for band in bands:
+                        val = (
+                            values.get(band, [])[i]
+                            if i < len(values.get(band, []))
+                            else ""
+                        )
+                        row.append(str(val) if val is not None else "")
+                    text += "\t".join(row) + "\n"
+        else:
+            # Single location format
+            dates = self._data.get("dates", [])
+            values = self._data.get("values", {})
+            bands = self._data.get("bands", [])
+
+            text = "date\t" + "\t".join(bands) + "\n"
+            for i, date in enumerate(dates):
+                row = [date]
+                for band in bands:
+                    val = (
+                        values.get(band, [])[i] if i < len(values.get(band, [])) else ""
+                    )
+                    row.append(str(val) if val is not None else "")
+                text += "\t".join(row) + "\n"
+
+        clipboard = QApplication.clipboard()
+        clipboard.setText(text)
+
+        QMessageBox.information(
+            self, "Copied", "Data copied to clipboard (tab-separated format)."
+        )
+
+
+class PixelTimeSeriesMapTool:
+    """Map tool for clicking to get pixel time series data."""
+
+    def __init__(self, iface, callback):
+        """Initialize the map tool.
+
+        Args:
+            iface: QGIS interface instance.
+            callback: Function to call with (lon, lat) when map is clicked.
+        """
+        from qgis.gui import QgsMapTool
+        from qgis.PyQt.QtCore import Qt
+
+        class ClickTool(QgsMapTool):
+            def __init__(self, canvas, callback):
+                super().__init__(canvas)
+                self.callback = callback
+                self.setCursor(Qt.CrossCursor)
+
+            def canvasReleaseEvent(self, event):
+                # Get click coordinates
+                point = self.toMapCoordinates(event.pos())
+
+                # Transform to EPSG:4326
+                from qgis.core import (
+                    QgsCoordinateReferenceSystem,
+                    QgsCoordinateTransform,
+                    QgsProject,
+                )
+
+                map_crs = self.canvas().mapSettings().destinationCrs()
+                wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
+
+                if map_crs.authid() != "EPSG:4326":
+                    transform = QgsCoordinateTransform(
+                        map_crs, wgs84, QgsProject.instance()
+                    )
+                    point = transform.transform(point)
+
+                self.callback(point.x(), point.y())
+
+        self.tool = ClickTool(iface.mapCanvas(), callback)
+
+    def activate(self):
+        """Activate the map tool."""
+        from qgis.utils import iface
+
+        iface.mapCanvas().setMapTool(self.tool)
+
+    def deactivate(self):
+        """Deactivate the map tool."""
+        from qgis.utils import iface
+
+        iface.mapCanvas().unsetMapTool(self.tool)
+
+
 class InspectorMapTool:
     """Map tool for clicking to inspect Earth Engine data."""
 
@@ -874,6 +2065,18 @@ class CatalogDockWidget(QDockWidget):
         self._bbox_drawing_mode = None  # 'ts' or 'load'
         self._bbox_rubber_band = None
         self._bbox_map_tool = None
+
+        # Pixel time series inspector
+        self._pixel_inspector_map_tool = None
+        self._pixel_inspector_active = False
+        self._pixel_timeseries_thread = None
+        self._pixel_timeseries_data = {}  # Dict mapping location_id to data
+        self._pixel_chart_dialog = None
+        self._clicked_lon = None
+        self._clicked_lat = None
+        self._pixel_markers = []  # List of markers for clicked locations
+        self._pixel_locations = []  # List of (lon, lat, id) tuples
+        self._location_counter = 0  # Counter for unique location IDs
 
         self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         self.setMinimumWidth(380)
@@ -1740,6 +2943,111 @@ class CatalogDockWidget(QDockWidget):
         )
         copy_btn_layout.addWidget(self.ts_copy_code_btn)
         layout.addLayout(copy_btn_layout)
+
+        # Separator
+        separator = QLabel("")
+        separator.setStyleSheet("border-top: 1px solid #cccccc; margin: 10px 0;")
+        separator.setFixedHeight(10)
+        layout.addWidget(separator)
+
+        # ==================== Pixel Time Series Inspector ====================
+        pixel_inspector_group = QGroupBox("📈 Pixel Time Series Inspector")
+        pixel_inspector_group.setStyleSheet(
+            "QGroupBox { font-weight: bold; border: 2px solid #3498db; "
+            "border-radius: 5px; margin-top: 10px; padding-top: 10px; }"
+            "QGroupBox::title { subcontrol-origin: margin; left: 10px; "
+            "padding: 0 5px; color: #2980b9; }"
+        )
+        pixel_layout = QVBoxLayout(pixel_inspector_group)
+
+        # Instructions
+        pixel_instructions = QLabel(
+            "Click on the map to extract time series values at a point location.\n"
+            "Similar to Earth Engine's ui.Chart.image.series functionality.\n"
+            "A marker will be placed on the map and the chart will open automatically."
+        )
+        pixel_instructions.setWordWrap(True)
+        pixel_instructions.setStyleSheet("color: gray; font-size: 11px;")
+        pixel_layout.addWidget(pixel_instructions)
+
+        # Start/Stop Inspector button and location display
+        inspector_btn_layout = QHBoxLayout()
+
+        self.pixel_inspector_btn = QPushButton("▶ Start Pixel Inspector")
+        self.pixel_inspector_btn.setCheckable(True)
+        self.pixel_inspector_btn.setStyleSheet(
+            "QPushButton { background-color: #27ae60; color: white; font-weight: bold; }"
+            "QPushButton:checked { background-color: #e74c3c; }"
+        )
+        self.pixel_inspector_btn.clicked.connect(self._toggle_pixel_inspector)
+        inspector_btn_layout.addWidget(self.pixel_inspector_btn)
+
+        self.pixel_clear_btn = QPushButton("Clear Marker")
+        self.pixel_clear_btn.clicked.connect(self._clear_pixel_inspector)
+        inspector_btn_layout.addWidget(self.pixel_clear_btn)
+
+        pixel_layout.addLayout(inspector_btn_layout)
+
+        # Location display
+        location_layout = QFormLayout()
+        self.pixel_lon_label = QLabel("--")
+        self.pixel_lat_label = QLabel("--")
+        location_layout.addRow("Longitude:", self.pixel_lon_label)
+        location_layout.addRow("Latitude:", self.pixel_lat_label)
+        pixel_layout.addLayout(location_layout)
+
+        # Band selection for pixel inspector
+        pixel_band_layout = QFormLayout()
+        self.pixel_bands_input = QLineEdit()
+        self.pixel_bands_input.setPlaceholderText(
+            "e.g., NDVI,EVI or leave empty for all bands"
+        )
+        self.pixel_bands_input.setToolTip(
+            "Comma-separated list of band names to extract.\n"
+            "Leave empty to extract all bands from the collection."
+        )
+        pixel_band_layout.addRow("Bands to Extract:", self.pixel_bands_input)
+
+        # Scale for pixel extraction
+        self.pixel_scale_spin = QSpinBox()
+        self.pixel_scale_spin.setRange(1, 10000)
+        self.pixel_scale_spin.setValue(30)
+        self.pixel_scale_spin.setSuffix(" m")
+        self.pixel_scale_spin.setToolTip("Resolution for extracting pixel values")
+        pixel_band_layout.addRow("Scale:", self.pixel_scale_spin)
+
+        pixel_layout.addLayout(pixel_band_layout)
+
+        # Multi-location options
+        multi_loc_layout = QHBoxLayout()
+        self.multi_location_check = QCheckBox("Compare multiple locations")
+        self.multi_location_check.setChecked(False)
+        self.multi_location_check.setToolTip(
+            "When checked, clicking adds new markers without clearing previous ones.\n"
+            "All locations will be plotted on the same chart for comparison."
+        )
+        multi_loc_layout.addWidget(self.multi_location_check)
+
+        # Location counter label
+        self.location_count_label = QLabel("(0 locations)")
+        self.location_count_label.setStyleSheet("color: gray; font-size: 10px;")
+        multi_loc_layout.addWidget(self.location_count_label)
+        multi_loc_layout.addStretch()
+
+        pixel_layout.addLayout(multi_loc_layout)
+
+        # Pixel inspector progress and status
+        self.pixel_progress_bar = QProgressBar()
+        self.pixel_progress_bar.setVisible(False)
+        self.pixel_progress_bar.setTextVisible(False)
+        pixel_layout.addWidget(self.pixel_progress_bar)
+
+        self.pixel_status_label = QLabel("Click 'Start Pixel Inspector' to begin.")
+        self.pixel_status_label.setWordWrap(True)
+        self.pixel_status_label.setStyleSheet("color: gray; font-size: 10px;")
+        pixel_layout.addWidget(self.pixel_status_label)
+
+        layout.addWidget(pixel_inspector_group)
 
         layout.addStretch()
 
@@ -2926,7 +4234,7 @@ class CatalogDockWidget(QDockWidget):
         if region_type == 0:  # Map extent
             bounds = self._get_map_extent_wgs84()
             if bounds:
-                return ee.Geometry.Rectangle(bounds)
+                return ee.Geometry.Rectangle(bounds, geodesic=False)
             else:
                 QMessageBox.warning(self, "Error", "Could not get map extent.")
                 return None
@@ -2960,7 +4268,7 @@ class CatalogDockWidget(QDockWidget):
                 extent.xMaximum(),
                 extent.yMaximum(),
             ]
-            return ee.Geometry.Rectangle(bounds)
+            return ee.Geometry.Rectangle(bounds, geodesic=False)
 
         elif region_type == 2:  # Draw bounding box
             if self._export_drawn_bounds is None:
@@ -2968,7 +4276,7 @@ class CatalogDockWidget(QDockWidget):
                     self, "Error", "Please draw a bounding box on the map first."
                 )
                 return None
-            return ee.Geometry.Rectangle(self._export_drawn_bounds)
+            return ee.Geometry.Rectangle(self._export_drawn_bounds, geodesic=False)
 
         elif region_type == 3:  # Custom bounds
             bounds_text = self.export_bounds_edit.text().strip()
@@ -2976,7 +4284,7 @@ class CatalogDockWidget(QDockWidget):
                 parts = [float(x.strip()) for x in bounds_text.split(",")]
                 if len(parts) != 4:
                     raise ValueError("Need exactly 4 values")
-                return ee.Geometry.Rectangle(parts)
+                return ee.Geometry.Rectangle(parts, geodesic=False)
             except Exception as e:
                 QMessageBox.warning(
                     self,
@@ -3889,8 +5197,79 @@ class CatalogDockWidget(QDockWidget):
                 except Exception:
                     pass
 
+            # Generate and copy time series Python code snippet to clipboard
+            self._copy_timeseries_code_for_dataset(asset_id, name, start_date, end_date)
+
             # Switch to Time Series tab (index 2)
             self.tab_widget.setCurrentIndex(2)
+
+    def _copy_timeseries_code_for_dataset(self, asset_id, name, start_date, end_date):
+        """Generate and copy time series Python code snippet to clipboard."""
+        from datetime import datetime
+
+        # Use current date values if not provided
+        if not start_date:
+            start_date = self.ts_start_date.date().toString("yyyy-MM-dd")
+        else:
+            start_date = start_date[:10]  # Ensure YYYY-MM-DD format
+
+        if not end_date:
+            end_date = self.ts_end_date.date().toString("yyyy-MM-dd")
+        else:
+            end_date = end_date[:10]
+
+        code = f'''import ee
+import geemap
+
+# Initialize Earth Engine
+# ee.Authenticate()  # Uncomment if not authenticated
+# ee.Initialize(project='your-project-id')  # Set your project ID
+
+# Load the ImageCollection
+collection = ee.ImageCollection('{asset_id}')
+
+# Filter by date range
+collection = collection.filterDate('{start_date}', '{end_date}')
+
+# Define a point of interest (change coordinates as needed)
+point = ee.Geometry.Point([0, 0])  # Replace with your coordinates
+
+# Filter by location
+collection = collection.filterBounds(point)
+
+# Create a chart of time series at the point
+# Option 1: Using geemap (interactive)
+Map = geemap.Map()
+Map.centerObject(point, 10)
+Map.addLayer(collection.median(), {{}}, '{name}')
+Map
+
+# Option 2: Extract time series data programmatically
+def extract_values(image):
+    """Extract pixel values at the point."""
+    values = image.reduceRegion(
+        reducer=ee.Reducer.first(),
+        geometry=point,
+        scale=30
+    )
+    return ee.Feature(None, {{
+        'date': image.date().format('YYYY-MM-dd'),
+        'values': values
+    }})
+
+# Get time series data
+features = collection.map(extract_values)
+data = features.getInfo()
+
+# Print results
+for f in data['features']:
+    print(f['properties']['date'], f['properties']['values'])
+'''
+
+        clipboard = QApplication.clipboard()
+        clipboard.setText(code)
+
+        self._show_success(f"Time series code copied to clipboard for: {name}")
 
     def _add_dataset_to_map(self, dataset):
         """Add a dataset to the map with default visualization."""
@@ -4092,7 +5471,7 @@ class CatalogDockWidget(QDockWidget):
             # Apply spatial filter
             bbox = self._get_spatial_filter_load()
             if bbox:
-                geometry = ee.Geometry.Rectangle(bbox)
+                geometry = ee.Geometry.Rectangle(bbox, geodesic=False)
                 collection = collection.filterBounds(geometry)
 
             # Apply cloud filter
@@ -4535,7 +5914,7 @@ class CatalogDockWidget(QDockWidget):
                 west, south, east, north = bbox
                 code_lines.append(f"# Spatial filter (EPSG:4326)")
                 code_lines.append(
-                    f"geometry = ee.Geometry.Rectangle([{west}, {south}, {east}, {north}])"
+                    f"geometry = ee.Geometry.Rectangle([{west}, {south}, {east}, {north}], geodesic=False)"
                 )
                 code_lines.append(f"collection = collection.filterBounds(geometry)")
 
@@ -5352,6 +6731,350 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
 
     # ==================== Time Series Methods ====================
 
+    # ==================== Pixel Time Series Inspector Methods ====================
+
+    def _toggle_pixel_inspector(self):
+        """Toggle the pixel time series inspector map tool on/off."""
+        if self.pixel_inspector_btn.isChecked():
+            # Start pixel inspector
+            if not self._pixel_inspector_map_tool:
+                self._pixel_inspector_map_tool = PixelTimeSeriesMapTool(
+                    self.iface, self._on_pixel_clicked
+                )
+
+            self._pixel_inspector_map_tool.activate()
+            self._pixel_inspector_active = True
+            self.pixel_inspector_btn.setText("■ Stop Pixel Inspector")
+            self.pixel_status_label.setText(
+                "Pixel inspector active. Click on the map to select a location."
+            )
+            self.pixel_status_label.setStyleSheet("color: #2980b9; font-size: 10px;")
+        else:
+            # Stop pixel inspector
+            if self._pixel_inspector_map_tool:
+                self._pixel_inspector_map_tool.deactivate()
+
+            self._pixel_inspector_active = False
+            self.pixel_inspector_btn.setText("▶ Start Pixel Inspector")
+            self.pixel_status_label.setText("Pixel inspector stopped.")
+            self.pixel_status_label.setStyleSheet("color: gray; font-size: 10px;")
+
+    def _clear_pixel_inspector(self):
+        """Clear pixel inspector results and reset location."""
+        self._clicked_lon = None
+        self._clicked_lat = None
+        self._pixel_timeseries_data = {}
+        self._pixel_locations = []
+        self._location_counter = 0
+        self.pixel_lon_label.setText("--")
+        self.pixel_lat_label.setText("--")
+        self.pixel_progress_bar.setVisible(False)
+        self.pixel_status_label.setText("All markers and results cleared.")
+        self.pixel_status_label.setStyleSheet("color: gray; font-size: 10px;")
+        self.location_count_label.setText("(0 locations)")
+
+        # Remove all markers from the map
+        self._remove_all_pixel_markers()
+
+    def _add_pixel_marker(self, lon, lat, location_id):
+        """Add a marker on the map at the clicked location."""
+        from qgis.gui import QgsRubberBand
+        from qgis.core import (
+            QgsWkbTypes,
+            QgsPointXY,
+            QgsCoordinateReferenceSystem,
+            QgsCoordinateTransform,
+            QgsProject,
+        )
+        from qgis.PyQt.QtGui import QColor
+        import random
+
+        # If not in multi-location mode, clear previous markers
+        if not self.multi_location_check.isChecked():
+            self._remove_all_pixel_markers()
+            self._pixel_locations = []
+            self._pixel_timeseries_data = {}
+
+        canvas = self.iface.mapCanvas()
+
+        # Generate a color for this marker (use consistent colors based on ID)
+        random.seed(location_id)
+        r = random.randint(100, 255)
+        g = random.randint(50, 200)
+        b = random.randint(50, 200)
+
+        # Create marker as a point rubber band
+        marker = QgsRubberBand(canvas, QgsWkbTypes.PointGeometry)
+        marker.setColor(QColor(r, g, b, 220))
+        marker.setFillColor(QColor(r, g, b, 180))
+        marker.setWidth(2)
+        marker.setIconSize(8)  # Smaller marker size
+        marker.setIcon(QgsRubberBand.ICON_CIRCLE)
+
+        # Transform from WGS84 to map CRS
+        map_crs = canvas.mapSettings().destinationCrs()
+        wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
+
+        point = QgsPointXY(lon, lat)
+        if map_crs.authid() != "EPSG:4326":
+            transform = QgsCoordinateTransform(wgs84, map_crs, QgsProject.instance())
+            point = transform.transform(point)
+
+        marker.addPoint(point)
+        marker.show()
+
+        # Store marker and location info
+        self._pixel_markers.append(marker)
+        self._pixel_locations.append((lon, lat, location_id, QColor(r, g, b)))
+
+        # Update location count label
+        self.location_count_label.setText(
+            f"({len(self._pixel_locations)} location{'s' if len(self._pixel_locations) != 1 else ''})"
+        )
+
+    def _remove_all_pixel_markers(self):
+        """Remove all pixel markers from the map."""
+        canvas = self.iface.mapCanvas()
+        for marker in self._pixel_markers:
+            if marker:
+                canvas.scene().removeItem(marker)
+        self._pixel_markers = []
+
+    def _on_pixel_clicked(self, lon, lat):
+        """Handle pixel click event from the map tool."""
+        self._clicked_lon = lon
+        self._clicked_lat = lat
+
+        # Generate unique location ID
+        self._location_counter += 1
+        location_id = self._location_counter
+
+        # Update location display
+        self.pixel_lon_label.setText(f"{lon:.6f}")
+        self.pixel_lat_label.setText(f"{lat:.6f}")
+
+        # Add marker on the map
+        self._add_pixel_marker(lon, lat, location_id)
+
+        # Auto-extract time series and show chart
+        self._auto_extract_pixel_timeseries(location_id)
+
+    def _auto_extract_pixel_timeseries(self, location_id):
+        """Auto-extract time series at the clicked location (triggered by map click)."""
+        # Get dataset ID from the Time Series tab input
+        asset_id = self.ts_dataset_id_input.text().strip()
+        if not asset_id:
+            self.pixel_status_label.setText(
+                f"Location: ({self._clicked_lon:.6f}, {self._clicked_lat:.6f})\n"
+                "⚠️ Please enter an Asset ID above to extract time series."
+            )
+            self.pixel_status_label.setStyleSheet("color: #f39c12; font-size: 10px;")
+            return
+
+        if ee is None:
+            self.pixel_status_label.setText(
+                "⚠️ Earth Engine API not available. Please install earthengine-api."
+            )
+            self.pixel_status_label.setStyleSheet("color: #e74c3c; font-size: 10px;")
+            return
+
+        # Get parameters from UI
+        start_date = self.ts_start_date.date().toString("yyyy-MM-dd")
+        end_date = self.ts_end_date.date().toString("yyyy-MM-dd")
+        scale = self.pixel_scale_spin.value()
+
+        # Get bands if specified
+        bands = None
+        bands_text = self.pixel_bands_input.text().strip()
+        if bands_text:
+            bands = [b.strip().strip("\"'") for b in bands_text.split(",") if b.strip()]
+
+        # Get cloud cover settings
+        cloud_cover = None
+        if self.ts_use_cloud_filter.isChecked():
+            cloud_cover = self.ts_cloud_cover_spin.value()
+
+        custom_cloud_property = self.ts_cloud_property_input.text().strip()
+        cloud_property = self._get_cloud_property(asset_id, custom_cloud_property)
+
+        # Show progress and set waiting cursor
+        self.pixel_progress_bar.setVisible(True)
+        self.pixel_progress_bar.setRange(0, 0)  # Indeterminate mode
+        self.pixel_status_label.setText(
+            f"Extracting time series data for location {location_id}..."
+        )
+        self.pixel_status_label.setStyleSheet("color: #2980b9; font-size: 10px;")
+        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
+
+        # Store current location_id for the callback
+        self._current_extraction_location_id = location_id
+
+        # Start the worker thread
+        self._pixel_timeseries_thread = PixelTimeSeriesWorker(
+            asset_id=asset_id,
+            lon=self._clicked_lon,
+            lat=self._clicked_lat,
+            start_date=start_date,
+            end_date=end_date,
+            bands=bands,
+            scale=scale,
+            cloud_cover=cloud_cover,
+            cloud_property=cloud_property,
+        )
+        self._pixel_timeseries_thread.finished.connect(
+            self._on_pixel_timeseries_finished
+        )
+        self._pixel_timeseries_thread.error.connect(self._on_pixel_timeseries_error)
+        self._pixel_timeseries_thread.progress.connect(
+            lambda msg: self.pixel_status_label.setText(msg)
+        )
+        self._pixel_timeseries_thread.start()
+
+    def _on_pixel_timeseries_finished(self, data):
+        """Handle completed pixel time series extraction."""
+        # Restore cursor
+        QApplication.restoreOverrideCursor()
+        self.pixel_progress_bar.setVisible(False)
+
+        # Get the location ID for this extraction
+        location_id = getattr(self, "_current_extraction_location_id", 1)
+
+        # Find the color for this location
+        location_color = None
+        for loc in self._pixel_locations:
+            if loc[2] == location_id:
+                location_color = loc[3]  # QColor stored in tuple
+                break
+
+        # Add location info to the data
+        data["location_id"] = location_id
+        data["location_color"] = location_color
+
+        # Store the data by location ID
+        self._pixel_timeseries_data[location_id] = data
+
+        num_images = data.get("metadata", {}).get("num_images", 0)
+        num_bands = len(data.get("bands", []))
+        num_locations = len(self._pixel_timeseries_data)
+
+        self.pixel_status_label.setText(
+            f"✓ Location {location_id}: {num_images} data points for {num_bands} band(s).\n"
+            f"Total: {num_locations} location(s). Click for more."
+        )
+        self.pixel_status_label.setStyleSheet("color: #27ae60; font-size: 10px;")
+
+        # Show the chart dialog with all locations
+        self._show_pixel_timeseries_chart_multi()
+
+    def _on_pixel_timeseries_error(self, error_msg):
+        """Handle pixel time series extraction error."""
+        # Restore cursor
+        QApplication.restoreOverrideCursor()
+        self.pixel_progress_bar.setVisible(False)
+
+        self.pixel_status_label.setText(f"Error: {error_msg[:100]}...")
+        self.pixel_status_label.setStyleSheet("color: #e74c3c; font-size: 10px;")
+
+        QMessageBox.critical(
+            self,
+            "Extraction Error",
+            f"Failed to extract time series data:\n\n{error_msg}",
+        )
+
+    def _show_pixel_timeseries_chart(self, data):
+        """Show the interactive time series chart dialog for a single location."""
+        # Create or reuse chart dialog
+        if self._pixel_chart_dialog is None:
+            self._pixel_chart_dialog = TimeSeriesChartDialog(self)
+
+        self._pixel_chart_dialog.set_data(data)
+        self._pixel_chart_dialog.show()
+        self._pixel_chart_dialog.raise_()
+        self._pixel_chart_dialog.activateWindow()
+
+    def _show_pixel_timeseries_chart_multi(self):
+        """Show the interactive time series chart dialog with multiple locations."""
+        # Create or reuse chart dialog
+        if self._pixel_chart_dialog is None:
+            self._pixel_chart_dialog = TimeSeriesChartDialog(self)
+
+        # Set data for multiple locations
+        self._pixel_chart_dialog.set_multi_location_data(
+            self._pixel_timeseries_data, self._pixel_locations
+        )
+        self._pixel_chart_dialog.show()
+        self._pixel_chart_dialog.raise_()
+        self._pixel_chart_dialog.activateWindow()
+
+    def _export_existing_pixel_data(self):
+        """Export already-extracted pixel time series data to CSV."""
+        if not self._pixel_timeseries_data:
+            return
+
+        # Get save path
+        metadata = self._pixel_timeseries_data.get("metadata", {})
+        default_name = (
+            f"timeseries_{metadata.get('lon', 0):.4f}_{metadata.get('lat', 0):.4f}.csv"
+        )
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Export Time Series to CSV", default_name, "CSV Files (*.csv)"
+        )
+        if not file_path:
+            return
+
+        if not file_path.lower().endswith(".csv"):
+            file_path += ".csv"
+
+        try:
+            dates = self._pixel_timeseries_data.get("dates", [])
+            values = self._pixel_timeseries_data.get("values", {})
+            bands = self._pixel_timeseries_data.get("bands", [])
+
+            with open(file_path, "w", encoding="utf-8") as f:
+                # Write metadata as comments
+                f.write(f"# Asset ID: {metadata.get('asset_id', '')}\n")
+                f.write(
+                    f"# Location: ({metadata.get('lon', 0):.6f}, {metadata.get('lat', 0):.6f})\n"
+                )
+                f.write(
+                    f"# Date Range: {metadata.get('start_date', '')} to {metadata.get('end_date', '')}\n"
+                )
+                f.write(f"# Scale: {metadata.get('scale', 30)} meters\n")
+                f.write("#\n")
+
+                # Write header
+                f.write("date," + ",".join(bands) + "\n")
+
+                # Write data
+                for i, date in enumerate(dates):
+                    row = [date]
+                    for band in bands:
+                        val = (
+                            values.get(band, [])[i]
+                            if i < len(values.get(band, []))
+                            else ""
+                        )
+                        row.append(str(val) if val is not None else "")
+                    f.write(",".join(row) + "\n")
+
+            self.pixel_status_label.setText(f"Exported to: {file_path}")
+            self.pixel_status_label.setStyleSheet("color: #27ae60; font-size: 10px;")
+
+            QMessageBox.information(
+                self,
+                "Export Complete",
+                f"Time series data exported to:\n{file_path}",
+            )
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Export Error",
+                f"Failed to export data:\n{str(e)}",
+            )
+
+    # ==================== End Pixel Time Series Inspector Methods ====================
+
     def _create_timeseries(self):
         """Create a time series from the specified ImageCollection."""
         if ee is None:
@@ -5551,7 +7274,7 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
 
         region_geom = None
         if region:
-            region_geom = ee.Geometry.Rectangle(region)
+            region_geom = ee.Geometry.Rectangle(region, geodesic=False)
             collection = collection.filterBounds(region_geom)
 
         if cloud_cover is not None:
@@ -5815,7 +7538,7 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
             # Apply region filter if enabled
             region = self._get_spatial_filter_ts()
             if region:
-                geometry = ee.Geometry.Rectangle(region)
+                geometry = ee.Geometry.Rectangle(region, geodesic=False)
                 collection = collection.filterBounds(geometry)
 
             size = collection.size().getInfo()
@@ -5910,7 +7633,7 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
             west, south, east, north = bbox
             code_lines.append(f"# Spatial filter")
             code_lines.append(
-                f"region = ee.Geometry.Rectangle([{west}, {south}, {east}, {north}])"
+                f"region = ee.Geometry.Rectangle([{west}, {south}, {east}, {north}], geodesic=False)"
             )
             code_lines.append("")
 
