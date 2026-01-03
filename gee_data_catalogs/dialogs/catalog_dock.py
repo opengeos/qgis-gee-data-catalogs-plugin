@@ -6756,7 +6756,10 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
 
             self._pixel_inspector_active = False
             self.pixel_inspector_btn.setText("▶ Start Pixel Inspector")
-            self.pixel_status_label.setText("Pixel inspector stopped.")
+            self.pixel_status_label.setText(
+                "Pixel inspector stopped. Existing markers remain on the map; use "
+                "'Clear Markers' to remove them."
+            )
             self.pixel_status_label.setStyleSheet("color: gray; font-size: 10px;")
 
     def _clear_pixel_inspector(self):
