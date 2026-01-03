@@ -96,7 +96,7 @@ cd geo
 From the `geo` folder:
 
 ```bash
-pixi add qgis geemap geopandas xee rioxarray 
+pixi add qgis geemap geopandas xee rioxarray
 ```
 
 #### 4) Authenticate Earth Engine
