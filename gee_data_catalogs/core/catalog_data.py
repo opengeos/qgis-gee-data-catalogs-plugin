@@ -56,6 +56,30 @@ DEFAULT_CATEGORIES = [
     "Other",
 ]
 
+# Mapping from raw category format (lowercase-hyphenated) to title case display format
+CATEGORY_RAW_TO_DISPLAY = {
+    "agriculture": "Agriculture",
+    "atmosphere": "Atmosphere",
+    "climate": "Climate",
+    "cryosphere": "Cryosphere",
+    "ecosystems": "Ecosystems",
+    "elevation-topography": "Elevation & Topography",
+    "fire": "Fire",
+    "forest-biomass": "Forest & Biomass",
+    "infrastructure-boundaries": "Infrastructure & Boundaries",
+    "landuse-landcover": "Land Use & Land Cover",
+    "oceans": "Oceans",
+    "orthophotos": "Orthophotos",
+    "plant-productivity": "Plant Productivity",
+    "population": "Population",
+    "precipitation": "Precipitation",
+    "satellite-imagery": "Satellite Imagery",
+    "soil": "Soil",
+    "surface-ground-water": "Surface & Ground Water",
+    "vegetation-indices": "Vegetation Indices",
+    "water-vapor": "Water Vapor",
+}
+
 # Keywords to category mapping (aligned with official GEE categories)
 CATEGORY_KEYWORDS = {
     "Agriculture": [
@@ -271,8 +295,37 @@ CATEGORY_KEYWORDS = {
 }
 
 
+def _convert_raw_category(raw_category: str) -> str:
+    """Convert raw category format to display format.
+
+    The official GEE catalog uses lowercase-hyphenated format (e.g., 'elevation-topography').
+    Some datasets have multiple categories separated by ', ' (e.g., 'atmosphere, climate').
+    This function converts to title case display format, using the first category if multiple.
+
+    Args:
+        raw_category: Raw category string from the catalog.
+
+    Returns:
+        Display format category name (title case).
+    """
+    if not raw_category:
+        return "Other"
+
+    # Handle multiple categories - use the first one as primary
+    primary_category = raw_category.split(", ")[0].strip().lower()
+
+    # Look up in mapping
+    display_category = CATEGORY_RAW_TO_DISPLAY.get(primary_category)
+    if display_category:
+        return display_category
+
+    return "Other"
+
+
 def _categorize_dataset(dataset: Dict) -> str:
     """Determine the category for a dataset based on keywords.
+
+    This is used for community datasets that don't have a category field.
 
     Args:
         dataset: Dataset dictionary.
@@ -340,7 +393,12 @@ def _parse_tsv_catalog(content: str) -> List[Dict]:
             "catalog_url": row.get("catalog", ""),
             "source": "official",
         }
-        dataset["category"] = _categorize_dataset(dataset)
+        # Use category field from official catalog if available
+        raw_category = row.get("category", "")
+        if raw_category:
+            dataset["category"] = _convert_raw_category(raw_category)
+        else:
+            dataset["category"] = _categorize_dataset(dataset)
         datasets.append(dataset)
 
     return datasets
@@ -386,7 +444,12 @@ def _parse_json_catalog(content: str) -> List[Dict]:
                     "catalog_url": item.get("catalog", ""),
                     "source": "official",
                 }
-                dataset["category"] = _categorize_dataset(dataset)
+                # Use category field from official catalog if available
+                raw_category = item.get("category", "")
+                if raw_category:
+                    dataset["category"] = _convert_raw_category(raw_category)
+                else:
+                    dataset["category"] = _categorize_dataset(dataset)
                 datasets.append(dataset)
     except json.JSONDecodeError as e:
         QgsMessageLog.logMessage(
