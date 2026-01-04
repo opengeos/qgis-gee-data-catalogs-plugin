@@ -373,12 +373,16 @@ def _parse_tsv_catalog(content: str) -> List[Dict]:
         if row.get("deprecated", "").lower() == "true":
             continue
 
+        raw_type = row.get("type", "")
+        normalized_type = _normalize_type(raw_type)
+        snippet = row.get("snippet", "")
+
         dataset = {
             "id": row.get("id", ""),
             "name": row.get("title", row.get("id", "")),
             "title": row.get("title", ""),
-            "type": _normalize_type(row.get("type", "")),
-            "description": row.get("snippet", ""),
+            "type": normalized_type,
+            "description": snippet,
             "provider": row.get("provider", ""),
             "start_date": row.get("state_date", row.get("start_date", "")),
             "end_date": row.get("end_date", ""),
@@ -393,6 +397,12 @@ def _parse_tsv_catalog(content: str) -> List[Dict]:
             "catalog_url": row.get("catalog", ""),
             "source": "official",
         }
+
+        # For BigQuery tables, extract the table name from snippet
+        if normalized_type == "BigQueryTable":
+            bigquery_table = _extract_bigquery_table_name(snippet)
+            dataset["bigquery_table"] = bigquery_table
+
         # Use category field from official catalog if available
         raw_category = row.get("category", "")
         if raw_category:
@@ -402,6 +412,24 @@ def _parse_tsv_catalog(content: str) -> List[Dict]:
         datasets.append(dataset)
 
     return datasets
+
+
+def _extract_bigquery_table_name(snippet: str) -> str:
+    """Extract BigQuery table name from snippet.
+
+    Args:
+        snippet: The snippet string containing the loadBigQueryTable call.
+
+    Returns:
+        BigQuery table name or empty string if not found.
+    """
+    import re
+
+    # Pattern to match: ee.FeatureCollection.loadBigQueryTable('table_name')
+    match = re.search(r"loadBigQueryTable\(['\"]([^'\"]+)['\"]\)", snippet)
+    if match:
+        return match.group(1)
+    return ""
 
 
 def _parse_json_catalog(content: str) -> List[Dict]:
@@ -422,12 +450,16 @@ def _parse_json_catalog(content: str) -> List[Dict]:
                 if item.get("deprecated", False):
                     continue
 
+                raw_type = item.get("type", "")
+                normalized_type = _normalize_type(raw_type)
+                snippet = item.get("snippet", "")
+
                 dataset = {
                     "id": item.get("id", ""),
                     "name": item.get("title", item.get("id", "")),
                     "title": item.get("title", ""),
-                    "type": _normalize_type(item.get("type", "")),
-                    "description": item.get("snippet", item.get("description", "")),
+                    "type": normalized_type,
+                    "description": snippet if snippet else item.get("description", ""),
                     "provider": item.get("provider", ""),
                     "start_date": item.get("start_date", item.get("state_date", "")),
                     "end_date": item.get("end_date", ""),
@@ -444,6 +476,12 @@ def _parse_json_catalog(content: str) -> List[Dict]:
                     "catalog_url": item.get("catalog", ""),
                     "source": "official",
                 }
+
+                # For BigQuery tables, extract the table name from snippet
+                if normalized_type == "BigQueryTable":
+                    bigquery_table = _extract_bigquery_table_name(snippet)
+                    dataset["bigquery_table"] = bigquery_table
+
                 # Use category field from official catalog if available
                 raw_category = item.get("category", "")
                 if raw_category:
@@ -582,11 +620,13 @@ def _normalize_type(type_str: str) -> str:
         type_str: Raw type string.
 
     Returns:
-        Normalized type (Image, ImageCollection, FeatureCollection, Table).
+        Normalized type (Image, ImageCollection, FeatureCollection, BigQueryTable).
     """
     type_lower = str(type_str).lower().replace("_", "").replace(" ", "")
 
-    if "imagecollection" in type_lower:
+    if "bigquerytable" in type_lower or "bigquery" in type_lower:
+        return "BigQueryTable"
+    elif "imagecollection" in type_lower:
         return "ImageCollection"
     elif "featurecollection" in type_lower or "table" in type_lower:
         return "FeatureCollection"

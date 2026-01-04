@@ -2604,6 +2604,7 @@ class CatalogDockWidget(QDockWidget):
         self.type_filter.addItem("Image", "Image")
         self.type_filter.addItem("ImageCollection", "ImageCollection")
         self.type_filter.addItem("FeatureCollection", "FeatureCollection")
+        self.type_filter.addItem("BigQueryTable", "BigQueryTable")
         search_layout.addRow("Type:", self.type_filter)
 
         # Source filter for search
@@ -3660,6 +3661,126 @@ class CatalogDockWidget(QDockWidget):
                 Qgis.Warning,
             )
             return False
+
+    def _copy_dataset_snippet_to_clipboard(self, dataset):
+        """Generate and copy Python snippet for a dataset to clipboard.
+
+        Args:
+            dataset: The dataset dictionary.
+        """
+        if not dataset:
+            return
+
+        asset_id = dataset.get("id")
+        if not asset_id:
+            return
+
+        try:
+            # First try to get JavaScript code and convert it
+            js_code = self._get_js_code_for_asset(asset_id)
+            if js_code:
+                try:
+                    from geemap.conversion import js_snippet_to_py
+
+                    # Convert JavaScript to Python
+                    py_lines = js_snippet_to_py(
+                        js_code,
+                        add_new_cell=False,
+                        import_ee=True,
+                        import_geemap=True,
+                        show_map=False,
+                        Map="m",
+                    )
+
+                    if py_lines:
+                        py_code = "".join(py_lines)
+                        # Convert camelCase methods to snake_case
+                        py_code = self._camel_to_snake_methods(py_code)
+
+                        # Copy to clipboard
+                        clipboard = QApplication.clipboard()
+                        clipboard.setText(py_code)
+                        return
+                except Exception:
+                    # If conversion fails, fall through to generate basic snippet
+                    pass
+
+            # Generate basic Python snippet if no JS code or conversion failed
+            data_type = dataset.get("type", "").lower()
+            name = dataset.get("name", asset_id.split("/")[-1])
+
+            code_lines = [
+                "import ee",
+                "import geemap",
+                "",
+                "# Initialize Earth Engine",
+                "# ee.Initialize(project='your-ee-project')",
+                "",
+                "# Create interactive map",
+                "m = geemap.Map()",
+                "",
+            ]
+
+            if data_type == "image":
+                code_lines.append(f"# Load image: {name}")
+                code_lines.append(f"image = ee.Image('{asset_id}')")
+                code_lines.append("")
+                code_lines.append("# Visualization parameters")
+                code_lines.append("vis_params = {}")
+                code_lines.append("")
+                code_lines.append("# Add to map")
+                code_lines.append(f"m.add_layer(image, vis_params, '{name}')")
+            elif data_type == "imagecollection":
+                code_lines.append(f"# Load image collection: {name}")
+                code_lines.append(f"collection = ee.ImageCollection('{asset_id}')")
+                code_lines.append("")
+                code_lines.append("# Visualization parameters")
+                code_lines.append("vis_params = {}")
+                code_lines.append("")
+                code_lines.append("# Add to map (using mosaic)")
+                code_lines.append(
+                    f"m.add_layer(collection.mosaic(), vis_params, '{name}')"
+                )
+            elif data_type == "featurecollection":
+                code_lines.append(f"# Load feature collection: {name}")
+                code_lines.append(f"fc = ee.FeatureCollection('{asset_id}')")
+                code_lines.append("")
+                code_lines.append("# Add to map")
+                code_lines.append(f"m.add_layer(fc, {{}}, '{name}')")
+            elif data_type == "bigquerytable":
+                bigquery_table = dataset.get("bigquery_table", "")
+                if bigquery_table:
+                    code_lines.append(f"# Load BigQuery table: {name}")
+                    code_lines.append(
+                        f"fc = ee.FeatureCollection.loadBigQueryTable('{bigquery_table}')"
+                    )
+                    code_lines.append("")
+                    code_lines.append("# Add to map")
+                    code_lines.append(f"m.add_layer(fc, {{}}, '{name}')")
+                else:
+                    code_lines.append(f"# Dataset: {name}")
+                    code_lines.append(f"# Asset ID: {asset_id}")
+            else:
+                code_lines.append(f"# Load dataset: {name}")
+                code_lines.append(f"# Asset ID: {asset_id}")
+
+            code_lines.append("")
+            code_lines.append("# Display map")
+            code_lines.append("m")
+
+            py_code = "\n".join(code_lines)
+
+            # Copy to clipboard
+            clipboard = QApplication.clipboard()
+            clipboard.setText(py_code)
+
+        except Exception as e:
+            # Silently fail - don't interrupt the selection process
+            QgsMessageLog.logMessage(
+                f"Failed to copy snippet for {asset_id}: {e}",
+                "GEE Data Catalogs",
+                Qgis.Info,
+            )
 
     def _execute_code_internal(self, code):
         """Execute Python code internally (shared by multiple methods).
@@ -4956,6 +5077,8 @@ class CatalogDockWidget(QDockWidget):
             # Enable time series button only for ImageCollections
             is_image_collection = dataset.get("type", "").lower() == "imagecollection"
             self.timeseries_btn.setEnabled(is_image_collection)
+            # Copy Python snippet to clipboard when dataset is selected
+            self._copy_dataset_snippet_to_clipboard(dataset)
         else:
             self._selected_dataset = None
             self.info_text.clear()
@@ -5320,6 +5443,19 @@ for f in data['features']:
                     collection.size().getInfo()  # Verify it works
                     ee_object = collection.mosaic()
                     actual_type = "ImageCollection"
+                elif catalog_type == "bigquerytable":
+                    # BigQuery tables require loadBigQueryTable()
+                    bigquery_table = dataset.get("bigquery_table", "")
+                    if bigquery_table:
+                        ee_object = ee.FeatureCollection.loadBigQueryTable(
+                            bigquery_table
+                        )
+                        ee_object.size().getInfo()  # Verify it works
+                        actual_type = "BigQueryTable"
+                    else:
+                        raise ValueError(
+                            f"BigQuery table name not found for: {asset_id}"
+                        )
                 elif catalog_type == "featurecollection" or catalog_type == "table":
                     ee_object = ee.FeatureCollection(asset_id)
                     ee_object.size().getInfo()  # Verify it works
@@ -5330,6 +5466,13 @@ for f in data['features']:
 
             # If loading based on catalog type failed, auto-detect
             if ee_object is None:
+                # BigQuery tables cannot be auto-detected, must have bigquery_table field
+                if catalog_type == "bigquerytable":
+                    bigquery_table = dataset.get("bigquery_table", "")
+                    raise ValueError(
+                        f"Failed to load BigQuery table. Table name: {bigquery_table or 'not found'}"
+                    )
+
                 self._show_progress(f"Detecting asset type for {asset_id}...")
                 QCoreApplication.processEvents()
                 actual_type = detect_asset_type(asset_id)
@@ -5402,6 +5545,8 @@ for f in data['features']:
             # Enable time series button only for ImageCollections
             is_image_collection = dataset.get("type", "").lower() == "imagecollection"
             self.search_timeseries_btn.setEnabled(is_image_collection)
+            # Copy Python snippet to clipboard when dataset is selected
+            self._copy_dataset_snippet_to_clipboard(dataset)
         else:
             self.search_timeseries_btn.setEnabled(False)
 
