@@ -39,7 +39,7 @@ changelog=
     0.4.0
         - Add support for creating timeseries charts
         - Use the official GEE dataset categories
-        - Add support for loading BigQuery Table (#22)
+        - Add support for loading BigQuery Table
     0.3.0
         - Add plugin screenshots
         - Add support for exporting Earth Engine data
