@@ -20,7 +20,6 @@ from qgis.core import (
     Qgis,
 )
 
-
 # Track if EE has been initialized
 _ee_initialized = False
 
