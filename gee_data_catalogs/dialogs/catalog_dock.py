@@ -7773,7 +7773,9 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
             bands_text = self.ts_bands_input.text().strip()
             if bands_text:
                 reducer = self.ts_reducer_combo.currentText()
-                raw_bands = [b.strip().strip("\"'") for b in bands_text.split(",") if b.strip()]
+                raw_bands = [
+                    b.strip().strip("\"'") for b in bands_text.split(",") if b.strip()
+                ]
                 bands = [f"{b}_{reducer}" for b in raw_bands]
 
         # Get region from spatial filter or map extent
