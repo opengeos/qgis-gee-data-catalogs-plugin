@@ -777,6 +777,239 @@ class ExportWorkerThread(QThread):
         self.finished.emit(output_path)
 
 
+class TimeSeriesExportWorkerThread(QThread):
+    """Thread for batch exporting time series images in background.
+
+    Args:
+        images: List of ee.Image objects to export.
+        labels: List of labels corresponding to each image.
+        output_folder: Path to the output folder.
+        base_name: Base name for output files.
+        region: Region geometry [west, south, east, north] or ee.Geometry.
+        scale: Export scale in meters.
+        crs: Export CRS (e.g., "EPSG:3857").
+        bands: List of band names to export, or None for all bands.
+    """
+
+    finished = pyqtSignal(list, list)  # successful_paths, failed_indices
+    error = pyqtSignal(str)
+    progress = pyqtSignal(int, int, str)  # current, total, message
+    image_exported = pyqtSignal(int, str)  # index, output_path
+    image_failed = pyqtSignal(int, str)  # index, error_message
+
+    def __init__(
+        self,
+        images: list,
+        labels: list,
+        output_folder: str,
+        base_name: str,
+        region,
+        scale: int = 30,
+        crs: str = "EPSG:3857",
+        bands: list = None,
+    ):
+        super().__init__()
+        self.images = images
+        self.labels = labels
+        self.output_folder = output_folder
+        self.base_name = base_name
+        self.region = region
+        self.scale = scale
+        self.crs = crs
+        self.bands = bands
+
+    def _sanitize_filename(self, label: str) -> str:
+        """Clean label for use in filename.
+
+        Args:
+            label: The label to sanitize.
+
+        Returns:
+            Sanitized filename-safe string.
+        """
+        import re
+
+        # Replace common invalid characters with underscores
+        sanitized = re.sub(r'[<>:"/\\|?*\s]', "_", label)
+        # Remove multiple consecutive underscores
+        sanitized = re.sub(r"_+", "_", sanitized)
+        # Remove leading/trailing underscores
+        sanitized = sanitized.strip("_")
+        return sanitized
+
+    def _generate_filename(self, index: int, label: str) -> str:
+        """Generate output filename for an image.
+
+        Args:
+            index: Image index (0-based).
+            label: Image label.
+
+        Returns:
+            Full path to output file.
+        """
+        import os
+
+        sanitized_label = self._sanitize_filename(label)
+        filename = f"{self.base_name}_{index + 1:03d}_{sanitized_label}.tif"
+        return os.path.join(self.output_folder, filename)
+
+    def _export_single_image(self, image, output_path: str):
+        """Export a single ee.Image to COG.
+
+        Args:
+            image: The ee.Image to export.
+            output_path: Path to write the output file.
+
+        Raises:
+            ImportError: If required packages are not available.
+            ValueError: If the dataset has invalid dimensions.
+        """
+        import ee
+
+        try:
+            import xarray as xr
+            import xee  # noqa: F401 - registers the 'ee' engine
+        except ImportError as e:
+            raise ImportError(
+                f"Required packages not available: {e}\n"
+                "Please install xarray and xee: pip install xarray xee"
+            )
+
+        # Convert region to ee.Geometry if needed
+        region_geom = self.region
+        if isinstance(self.region, list):
+            region_geom = ee.Geometry.Rectangle(self.region, geodesic=False)
+
+        # Select bands if specified
+        if self.bands:
+            image = image.select(self.bands)
+
+        # Ensure image is an ee.Image (not a ComputedObject)
+        # by wrapping in ee.Image if needed
+        if not isinstance(image, ee.Image):
+            image = ee.Image(image)
+
+        # Clip to region
+        image = image.clip(region_geom)
+
+        # Open with xee using the 'ee' engine
+        ds = xr.open_dataset(
+            image,
+            engine="ee",
+            crs=self.crs,
+            scale=self.scale,
+            geometry=region_geom,
+        )
+
+        # Write as COG using rioxarray
+        try:
+            import rioxarray  # noqa: F401
+        except ImportError:
+            raise ImportError(
+                "rioxarray is required for COG export.\n"
+                "Please install it: pip install rioxarray"
+            )
+
+        # Handle xee dimension naming for rioxarray
+        rename_dims = {}
+        for old_x in ["X", "lon", "longitude"]:
+            if old_x in ds.dims:
+                rename_dims[old_x] = "x"
+                break
+        for old_y in ["Y", "lat", "latitude"]:
+            if old_y in ds.dims:
+                rename_dims[old_y] = "y"
+                break
+        if rename_dims:
+            ds = ds.rename(rename_dims)
+
+        # Drop time dimension if present
+        if "time" in ds.dims:
+            ds = ds.isel(time=0)
+
+        # Verify spatial dims exist
+        if "x" not in ds.dims or "y" not in ds.dims:
+            raise ValueError(
+                f"Could not find spatial dimensions. Available dims: {list(ds.dims)}"
+            )
+
+        # Set CRS and spatial dims
+        ds = ds.rio.write_crs(self.crs)
+        ds = ds.rio.set_spatial_dims(x_dim="x", y_dim="y")
+
+        # Get data variables
+        data_vars = list(ds.data_vars)
+        if not data_vars:
+            raise ValueError("No data variables found in the dataset")
+
+        # Export to COG
+        if len(data_vars) > 1:
+            import numpy as np
+
+            arrays = []
+            for var in data_vars:
+                da = ds[var]
+                if da.dims != ("y", "x"):
+                    da = da.transpose("y", "x")
+                arrays.append(da.values)
+
+            stacked = np.stack(arrays, axis=0)
+
+            da = xr.DataArray(
+                stacked,
+                dims=["band", "y", "x"],
+                coords={
+                    "band": list(range(1, len(data_vars) + 1)),
+                    "y": ds.y,
+                    "x": ds.x,
+                },
+            )
+            da = da.rio.write_crs(self.crs)
+            da = da.rio.set_spatial_dims(x_dim="x", y_dim="y")
+            da.rio.to_raster(output_path, driver="COG")
+        else:
+            da = ds[data_vars[0]]
+            if da.dims != ("y", "x"):
+                da = da.transpose("y", "x")
+            da.rio.to_raster(output_path, driver="COG")
+
+    def run(self):
+        """Main thread entry point - export all images."""
+        try:
+            total = len(self.images)
+            successful_paths = []
+            failed_indices = []
+
+            for i, (image, label) in enumerate(zip(self.images, self.labels)):
+                self.progress.emit(i + 1, total, f"Exporting {label}...")
+
+                output_path = self._generate_filename(i, label)
+
+                try:
+                    self._export_single_image(image, output_path)
+                    successful_paths.append(output_path)
+                    self.image_exported.emit(i, output_path)
+                except Exception as e:
+                    import traceback
+
+                    failed_indices.append(i)
+                    error_msg = f"{str(e)}\n{traceback.format_exc()}"
+                    self.image_failed.emit(i, str(e))
+                    # Log the error with full traceback
+                    QgsMessageLog.logMessage(
+                        f"Failed to export image {i + 1} ({label}): {error_msg}",
+                        "GEE Data Catalogs",
+                        Qgis.Warning,
+                    )
+
+            self.finished.emit(successful_paths, failed_indices)
+
+        except Exception as e:
+            import traceback
+
+            self.error.emit(f"{str(e)}\n\n{traceback.format_exc()}")
+
+
 class PixelTimeSeriesWorker(QThread):
     """Thread for extracting time series data at a point location."""
 
@@ -2058,6 +2291,7 @@ class CatalogDockWidget(QDockWidget):
         self._timeseries_timer = None
         self._timeseries_playing = False
         self._timeseries_current_index = 0
+        self._ts_export_thread = None
 
         # Drawn bounding box storage
         self._ts_drawn_bbox = None  # [west, south, east, north]
@@ -2944,6 +3178,92 @@ class CatalogDockWidget(QDockWidget):
         )
         copy_btn_layout.addWidget(self.ts_copy_code_btn)
         layout.addLayout(copy_btn_layout)
+
+        # ==================== Export Time Series ====================
+        ts_export_group = QGroupBox("📦 Export Time Series")
+        ts_export_group.setStyleSheet(
+            "QGroupBox { font-weight: bold; border: 2px solid #9b59b6; "
+            "border-radius: 5px; margin-top: 10px; padding-top: 10px; }"
+            "QGroupBox::title { subcontrol-origin: margin; left: 10px; "
+            "padding: 0 5px; color: #8e44ad; }"
+        )
+        ts_export_layout = QFormLayout(ts_export_group)
+
+        # Scale input
+        self.ts_export_scale_spin = QSpinBox()
+        self.ts_export_scale_spin.setRange(1, 10000)
+        self.ts_export_scale_spin.setValue(30)
+        self.ts_export_scale_spin.setSuffix(" m")
+        self.ts_export_scale_spin.setToolTip("Export resolution in meters")
+        ts_export_layout.addRow("Scale:", self.ts_export_scale_spin)
+
+        # Band export option
+        self.ts_export_vis_bands_check = QCheckBox("Export visualization bands only")
+        self.ts_export_vis_bands_check.setChecked(True)
+        self.ts_export_vis_bands_check.setToolTip(
+            "When checked, export only the bands specified in Visualization Parameters.\n"
+            "When unchecked, export all bands from the original images."
+        )
+        ts_export_layout.addRow("", self.ts_export_vis_bands_check)
+
+        # CRS input
+        self.ts_export_crs_input = QLineEdit()
+        self.ts_export_crs_input.setText("EPSG:3857")
+        self.ts_export_crs_input.setPlaceholderText("e.g., EPSG:3857, EPSG:4326")
+        self.ts_export_crs_input.setToolTip(
+            "Coordinate Reference System for export (e.g., EPSG:3857)"
+        )
+        ts_export_layout.addRow("CRS:", self.ts_export_crs_input)
+
+        # Base filename
+        self.ts_export_basename_input = QLineEdit()
+        self.ts_export_basename_input.setText("timeseries")
+        self.ts_export_basename_input.setPlaceholderText("e.g., timeseries, landsat")
+        self.ts_export_basename_input.setToolTip(
+            "Base name for output files.\n"
+            "Files will be named: {base}_{index}_{label}.tif"
+        )
+        ts_export_layout.addRow("Base Filename:", self.ts_export_basename_input)
+
+        # Output folder
+        ts_folder_layout = QHBoxLayout()
+        self.ts_export_folder_input = QLineEdit()
+        self.ts_export_folder_input.setPlaceholderText("Select output folder...")
+        self.ts_export_folder_input.setToolTip("Folder to save exported GeoTIFF files")
+        ts_folder_layout.addWidget(self.ts_export_folder_input)
+
+        self.ts_export_browse_btn = QPushButton("Browse...")
+        self.ts_export_browse_btn.clicked.connect(self._browse_ts_export_folder)
+        ts_folder_layout.addWidget(self.ts_export_browse_btn)
+        ts_export_layout.addRow("Output Folder:", ts_folder_layout)
+
+        # Export button
+        self.ts_export_btn = QPushButton("📥 Export All Images")
+        self.ts_export_btn.setEnabled(False)
+        self.ts_export_btn.clicked.connect(self._export_timeseries)
+        self.ts_export_btn.setToolTip(
+            "Export all time series images as separate GeoTIFF files"
+        )
+        self.ts_export_btn.setStyleSheet(
+            "QPushButton { background-color: #9b59b6; color: white; font-weight: bold; }"
+            "QPushButton:disabled { background-color: #bdc3c7; color: #7f8c8d; }"
+        )
+        ts_export_layout.addRow("", self.ts_export_btn)
+
+        # Progress bar (hidden by default, indeterminate mode)
+        self.ts_export_progress = QProgressBar()
+        self.ts_export_progress.setMinimum(0)
+        self.ts_export_progress.setMaximum(0)  # Indeterminate/spinning mode
+        self.ts_export_progress.setVisible(False)
+        ts_export_layout.addRow("", self.ts_export_progress)
+
+        # Status label
+        self.ts_export_status_label = QLabel("")
+        self.ts_export_status_label.setWordWrap(True)
+        self.ts_export_status_label.setStyleSheet("color: gray; font-size: 10px;")
+        ts_export_layout.addRow("", self.ts_export_status_label)
+
+        layout.addWidget(ts_export_group)
 
         # Separator
         separator = QLabel("")
@@ -7243,6 +7563,7 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
 
         QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
         self.ts_create_btn.setEnabled(False)
+        self.ts_export_btn.setEnabled(False)
 
         try:
             start_date = self.ts_start_date.date().toString("yyyy-MM-dd")
@@ -7379,6 +7700,9 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
             # Display first image
             self._display_timeseries_image(0)
 
+            # Enable export button
+            self.ts_export_btn.setEnabled(True)
+
             self._show_success(f"Time series created with {len(labels)} images")
 
         except Exception as e:
@@ -7393,6 +7717,222 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
         QApplication.restoreOverrideCursor()
         self.ts_create_btn.setEnabled(True)
         self._show_error(f"Time series error: {error}")
+
+    # ==================== Time Series Export Methods ====================
+
+    def _browse_ts_export_folder(self):
+        """Open dialog to select output folder for time series export."""
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Select Output Folder",
+            self.ts_export_folder_input.text() or "",
+        )
+        if folder:
+            self.ts_export_folder_input.setText(folder)
+
+    def _export_timeseries(self):
+        """Export all time series images as separate GeoTIFF files."""
+        import os
+
+        # Validate time series exists
+        if not self._timeseries_collection:
+            QMessageBox.warning(
+                self,
+                "No Time Series",
+                "Please create a time series first before exporting.",
+            )
+            return
+
+        # Validate output folder
+        output_folder = self.ts_export_folder_input.text().strip()
+        if not output_folder:
+            QMessageBox.warning(
+                self,
+                "No Output Folder",
+                "Please select an output folder.",
+            )
+            return
+
+        if not os.path.isdir(output_folder):
+            QMessageBox.warning(
+                self,
+                "Invalid Folder",
+                f"The specified folder does not exist:\n{output_folder}",
+            )
+            return
+
+        # Get export parameters
+        scale = self.ts_export_scale_spin.value()
+        crs = self.ts_export_crs_input.text().strip() or "EPSG:3857"
+        base_name = self.ts_export_basename_input.text().strip() or "timeseries"
+
+        # Get bands to export
+        # Note: Time series images have band names with reducer suffixes (e.g., B4_median)
+        bands = None
+        if self.ts_export_vis_bands_check.isChecked():
+            bands_text = self.ts_bands_input.text().strip()
+            if bands_text:
+                reducer = self.ts_reducer_combo.currentText()
+                raw_bands = [b.strip().strip("\"'") for b in bands_text.split(",") if b.strip()]
+                bands = [f"{b}_{reducer}" for b in raw_bands]
+
+        # Get region from spatial filter or map extent
+        region = self._get_spatial_filter_ts()
+        if not region:
+            region = self._get_map_extent_wgs84()
+
+        if not region:
+            QMessageBox.warning(
+                self,
+                "No Region",
+                "Could not determine export region. Please set a spatial filter or ensure the map has a valid extent.",
+            )
+            return
+
+        # Disable UI and show progress
+        self._set_ts_export_ui_enabled(False)
+        self.ts_export_progress.setVisible(True)
+        self.ts_export_status_label.setText("Starting export...")
+
+        # Start export thread
+        self._ts_export_thread = TimeSeriesExportWorkerThread(
+            images=self._timeseries_collection,
+            labels=self._timeseries_labels,
+            output_folder=output_folder,
+            base_name=base_name,
+            region=region,
+            scale=scale,
+            crs=crs,
+            bands=bands,
+        )
+        self._ts_export_thread.progress.connect(self._on_ts_export_progress)
+        self._ts_export_thread.image_exported.connect(self._on_ts_image_exported)
+        self._ts_export_thread.image_failed.connect(self._on_ts_image_failed)
+        self._ts_export_thread.finished.connect(self._on_ts_export_finished)
+        self._ts_export_thread.error.connect(self._on_ts_export_error)
+        self._ts_export_thread.start()
+
+    def _set_ts_export_ui_enabled(self, enabled: bool):
+        """Enable or disable export UI elements.
+
+        Args:
+            enabled: Whether to enable the UI elements.
+        """
+        self.ts_export_btn.setEnabled(enabled)
+        self.ts_export_browse_btn.setEnabled(enabled)
+        self.ts_export_scale_spin.setEnabled(enabled)
+        self.ts_export_crs_input.setEnabled(enabled)
+        self.ts_export_basename_input.setEnabled(enabled)
+        self.ts_export_folder_input.setEnabled(enabled)
+        self.ts_export_vis_bands_check.setEnabled(enabled)
+
+    def _on_ts_export_progress(self, current: int, total: int, message: str):
+        """Handle export progress update.
+
+        Args:
+            current: Current image index (1-based).
+            total: Total number of images.
+            message: Progress message.
+        """
+        # Progress bar is in indeterminate mode (spinning), just update status
+        self.ts_export_status_label.setText(f"[{current}/{total}] {message}")
+
+    def _on_ts_image_exported(self, index: int, output_path: str):
+        """Handle successful image export.
+
+        Args:
+            index: Image index (0-based).
+            output_path: Path to the exported file.
+        """
+        import os
+
+        QgsMessageLog.logMessage(
+            f"Exported image {index + 1}: {os.path.basename(output_path)}",
+            "GEE Data Catalogs",
+            Qgis.Info,
+        )
+
+    def _on_ts_image_failed(self, index: int, error_message: str):
+        """Handle failed image export.
+
+        Args:
+            index: Image index (0-based).
+            error_message: Error message.
+        """
+        label = (
+            self._timeseries_labels[index]
+            if index < len(self._timeseries_labels)
+            else f"Image {index + 1}"
+        )
+        QgsMessageLog.logMessage(
+            f"Failed to export {label}: {error_message}",
+            "GEE Data Catalogs",
+            Qgis.Warning,
+        )
+
+    def _on_ts_export_finished(self, successful_paths: list, failed_indices: list):
+        """Handle export completion.
+
+        Args:
+            successful_paths: List of successfully exported file paths.
+            failed_indices: List of indices that failed to export.
+        """
+        # Re-enable UI
+        self._set_ts_export_ui_enabled(True)
+        self.ts_export_progress.setVisible(False)
+
+        total = len(successful_paths) + len(failed_indices)
+        success_count = len(successful_paths)
+        fail_count = len(failed_indices)
+
+        if fail_count == 0:
+            self.ts_export_status_label.setText(
+                f"Export complete! {success_count} images exported."
+            )
+            self._show_success(f"Successfully exported {success_count} images.")
+        else:
+            # Build list of failed labels
+            failed_labels = []
+            for idx in failed_indices:
+                if idx < len(self._timeseries_labels):
+                    failed_labels.append(self._timeseries_labels[idx])
+                else:
+                    failed_labels.append(f"Image {idx + 1}")
+
+            self.ts_export_status_label.setText(
+                f"Export finished: {success_count}/{total} succeeded, {fail_count} failed."
+            )
+
+            failed_list = "\n".join(f"  - {label}" for label in failed_labels[:10])
+            if len(failed_labels) > 10:
+                failed_list += f"\n  ... and {len(failed_labels) - 10} more"
+
+            QMessageBox.warning(
+                self,
+                "Export Partially Complete",
+                f"Exported {success_count} of {total} images.\n\n"
+                f"Failed images:\n{failed_list}\n\n"
+                "Check the QGIS message log for details.",
+            )
+
+    def _on_ts_export_error(self, error_message: str):
+        """Handle critical export error.
+
+        Args:
+            error_message: Error message.
+        """
+        self._set_ts_export_ui_enabled(True)
+        self.ts_export_progress.setVisible(False)
+        self.ts_export_status_label.setText("Export failed.")
+
+        QgsMessageLog.logMessage(
+            f"Time series export error: {error_message}",
+            "GEE Data Catalogs",
+            Qgis.Critical,
+        )
+        self._show_error(f"Export failed:\n{error_message}")
+
+    # ==================== End Time Series Export Methods ====================
 
     def _build_timeseries_collection(
         self,
