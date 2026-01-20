@@ -33,10 +33,10 @@ A comprehensive QGIS plugin for browsing, searching, and loading Google Earth En
 
 The plugin dynamically fetches catalog data from:
 
-| Source | URL | Datasets |
-|--------|-----|----------|
-| Official Earth Engine Data Catalog | [TSV](https://raw.githubusercontent.com/opengeos/Earth-Engine-Catalog/master/gee_catalog.tsv) / [JSON](https://raw.githubusercontent.com/opengeos/Earth-Engine-Catalog/master/gee_catalog.json) |780+ |
-| Awesome GEE Community Catalog | [CSV](https://raw.githubusercontent.com/samapriya/awesome-gee-community-datasets/master/community_datasets.csv) / [JSON](https://raw.githubusercontent.com/samapriya/awesome-gee-community-datasets/master/community_datasets.json) | 4,360+ |
+| Source                             | URL                                                                                                                                                                                                                                 | Datasets |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| Official Earth Engine Data Catalog | [TSV](https://raw.githubusercontent.com/opengeos/Earth-Engine-Catalog/master/gee_catalog.tsv) / [JSON](https://raw.githubusercontent.com/opengeos/Earth-Engine-Catalog/master/gee_catalog.json)                                     | 780+     |
+| Awesome GEE Community Catalog      | [CSV](https://raw.githubusercontent.com/samapriya/awesome-gee-community-datasets/master/community_datasets.csv) / [JSON](https://raw.githubusercontent.com/samapriya/awesome-gee-community-datasets/master/community_datasets.json) | 4,360+   |
 
 ## Video Tutorial
 
@@ -334,6 +334,34 @@ python package_plugin.py
 ```
 
 This creates a zip file ready for upload to the QGIS plugin repository.
+
+## Troubleshooting
+
+If you encounter the error "Failed to initialize Google Earth Engine", you can try the following:
+
+### Method 1: Manually Authenticate Earth Engine in QGIS Python Console
+
+- Ensure you have an active Earth Engine account
+- Log in to your Earth Engine account at <https://code.earthengine.google.com> to get your Project ID
+- Open the QGIS Python Console (QGIS -> Plugins -> Python Console) and run the following Python code to authenticate and initialize Earth Engine. Make sure to replace `your-ee-project` with your actual Earth Engine Project ID.
+
+```python
+import ee
+ee.Authenticate()
+ee.Initialize(project="your-ee-project")
+```
+
+![](https://github.com/user-attachments/assets/a7321180-1261-4c82-b545-9dbe676a864c)
+
+### Method 2: Set `EE_PROJECT_ID` Environment Variable
+
+- Set the `EE_PROJECT_ID` environment variable in your system or QGIS profile.
+
+![](https://github.com/user-attachments/assets/952959df-5b13-44ec-a73d-cbb6b404d252)
+
+### Method 3: Enter Project ID in the **Settings** tab of the plugin
+
+![](https://github.com/user-attachments/assets/1a865934-2f40-4bbf-9b4c-a90b2a4a7dfa)
 
 ## Related Projects
 
