@@ -38,12 +38,16 @@ The plugin dynamically fetches catalog data from:
 | Official Earth Engine Data Catalog | [TSV](https://raw.githubusercontent.com/opengeos/Earth-Engine-Catalog/master/gee_catalog.tsv) / [JSON](https://raw.githubusercontent.com/opengeos/Earth-Engine-Catalog/master/gee_catalog.json)                                     | 780+     |
 | Awesome GEE Community Catalog      | [CSV](https://raw.githubusercontent.com/samapriya/awesome-gee-community-datasets/master/community_datasets.csv) / [JSON](https://raw.githubusercontent.com/samapriya/awesome-gee-community-datasets/master/community_datasets.json) | 4,360+   |
 
-## Video Tutorial
+## Video Tutorials
 
 👉 [This QGIS Plugin Unlocks 80 Petabytes of Satellite Data – For Free!](https://youtu.be/nZ3D6wLKJQw)
 
 [![Earth Engine Data Catalogs Plugin for QGIS](https://github.com/user-attachments/assets/1f6af038-a028-470a-bc43-8ee8394e2c08)](https://youtu.be/nZ3D6wLKJQw)
 
+
+👉 [Create Stunning Time-Series Satellite Images in Seconds!](https://youtu.be/8IW6XqnUjgg)
+
+[![Create Stunning Time-Series Satellite Images in Seconds](https://github.com/user-attachments/assets/09e6a5a8-db7f-46f7-84d4-0c272a6cae4b)](https://youtu.be/8IW6XqnUjgg)
 
 ## Installation
 
