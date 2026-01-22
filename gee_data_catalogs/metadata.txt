@@ -2,7 +2,7 @@
 name=Earth Engine Data Catalogs
 qgisMinimumVersion=3.28
 description=Browse, search, and load Google Earth Engine data catalogs directly in QGIS.
-version=0.5.0
+version=0.6.0
 author=Qiusheng Wu
 email=giswqs@gmail.com
 
@@ -36,6 +36,8 @@ experimental=False
 deprecated=False
 
 changelog=
+    0.6.0
+        - Add month range for time series creation
     0.5.0
         - Add support for exporting timeseries images
         - Add troubleshooting section to README
