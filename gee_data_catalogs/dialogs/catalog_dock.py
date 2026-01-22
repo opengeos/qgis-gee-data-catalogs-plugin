@@ -291,6 +291,8 @@ class TimeSeriesLoaderThread(QThread):
         cloud_cover: int = None,
         cloud_property: str = "CLOUDY_PIXEL_PERCENTAGE",
         property_filters: list = None,  # [(prop, op, value), ...]
+        month_start: int = None,  # Start month for filtering (1-12)
+        month_end: int = None,  # End month for filtering (1-12)
     ):
         super().__init__()
         self.asset_id = asset_id
@@ -303,6 +305,8 @@ class TimeSeriesLoaderThread(QThread):
         self.cloud_cover = cloud_cover
         self.cloud_property = cloud_property
         self.property_filters = property_filters or []
+        self.month_start = month_start
+        self.month_end = month_end
 
     def _apply_property_filters(self, collection):
         """Apply property filters to collection."""
@@ -323,6 +327,25 @@ class TimeSeriesLoaderThread(QThread):
                 collection = collection.filter(ee.Filter.lte(prop_name, value))
         return collection
 
+    def _is_month_in_range(self, month: int) -> bool:
+        """Check if a month falls within the specified month range.
+
+        Args:
+            month: Month number (1-12).
+
+        Returns:
+            True if month is within range, False otherwise.
+        """
+        if self.month_start is None or self.month_end is None:
+            return True
+
+        if self.month_start <= self.month_end:
+            # Normal range (e.g., 3-8 for Mar-Aug)
+            return self.month_start <= month <= self.month_end
+        else:
+            # Wrap-around range (e.g., 11-2 for Nov-Feb)
+            return month >= self.month_start or month <= self.month_end
+
     def run(self):
         try:
             import ee
@@ -330,7 +353,8 @@ class TimeSeriesLoaderThread(QThread):
             from dateutil.relativedelta import relativedelta
 
             self.progress.emit(
-                f"Creating time series with {self.frequency} frequency..."
+                f"Creating time series with {self.frequency} frequency... "
+                f"(month_start={self.month_start}, month_end={self.month_end})"
             )
 
             # Load the collection
@@ -355,6 +379,28 @@ class TimeSeriesLoaderThread(QThread):
             if self.property_filters:
                 collection = self._apply_property_filters(collection)
 
+            # Apply month filter if specified (supports wrap-around ranges)
+            use_month_filter = (
+                self.month_start is not None and self.month_end is not None
+            )
+            if use_month_filter:
+                if self.month_start <= self.month_end:
+                    collection = collection.filter(
+                        ee.Filter.calendarRange(
+                            self.month_start, self.month_end, "month"
+                        )
+                    )
+                else:
+                    collection = collection.filter(
+                        ee.Filter.Or(
+                            ee.Filter.calendarRange(self.month_start, 12, "month"),
+                            ee.Filter.calendarRange(1, self.month_end, "month"),
+                        )
+                    )
+                self.progress.emit(
+                    f"Applied month filter: {self.month_start}-{self.month_end}"
+                )
+
             # Select bands if specified
             if self.bands:
                 collection = collection.select(self.bands)
@@ -377,9 +423,31 @@ class TimeSeriesLoaderThread(QThread):
             end_dt = datetime.strptime(self.end_date, "%Y-%m-%d")
 
             dates = []
+            total_steps = 0
             current = start_dt
+
+            # Determine if month filtering should be applied to time steps
+            filter_dates_by_month = use_month_filter and self.frequency in (
+                "day",
+                "week",
+                "month",
+            )
+            self.progress.emit(
+                f"Month filter active: {use_month_filter}, "
+                f"filter_dates={filter_dates_by_month}"
+            )
+
             while current < end_dt:
-                dates.append(current.strftime("%Y-%m-%d"))
+                total_steps += 1
+                include_date = True
+
+                # Apply month filter to time steps if active
+                if filter_dates_by_month:
+                    include_date = self._is_month_in_range(current.month)
+
+                if include_date:
+                    dates.append(current.strftime("%Y-%m-%d"))
+
                 if unit == "day":
                     current += relativedelta(days=step)
                 elif unit == "week":
@@ -389,8 +457,22 @@ class TimeSeriesLoaderThread(QThread):
                 elif unit == "year":
                     current += relativedelta(years=step)
 
+            # Report filtering results
+            if filter_dates_by_month and total_steps > len(dates):
+                self.progress.emit(
+                    f"Month filter ({self.month_start}-{self.month_end}): "
+                    f"{total_steps} → {len(dates)} time steps"
+                )
+
             if not dates:
-                self.error.emit("No dates in the specified range")
+                if filter_dates_by_month:
+                    self.error.emit(
+                        f"No dates in the specified range after month filter "
+                        f"({self.month_start}-{self.month_end}). "
+                        f"Total steps checked: {total_steps}"
+                    )
+                else:
+                    self.error.emit("No dates in the specified range")
                 return
 
             self.progress.emit(f"Processing {len(dates)} time steps...")
@@ -415,6 +497,13 @@ class TimeSeriesLoaderThread(QThread):
 
                 # Filter collection for this time period
                 sub_col = collection.filterDate(start, end)
+
+                if use_month_filter and not filter_dates_by_month:
+                    if sub_col.size().getInfo() == 0:
+                        self.progress.emit(
+                            f"Skipping {date_str}: no images after month filter"
+                        )
+                        continue
 
                 # Reduce to single image
                 image = sub_col.reduce(reducer_func)
@@ -2545,6 +2634,37 @@ class CatalogDockWidget(QDockWidget):
 
         return collection
 
+    def _is_month_in_range(
+        self, month: int, month_start: int = None, month_end: int = None
+    ) -> bool:
+        """Check if a month falls within the specified month range."""
+        if month_start is None or month_end is None:
+            return True
+
+        if month_start <= month_end:
+            return month_start <= month <= month_end
+
+        return month >= month_start or month <= month_end
+
+    def _apply_month_range_filter(
+        self, collection, month_start: int = None, month_end: int = None
+    ):
+        """Apply a month range filter to an ImageCollection."""
+        if month_start is None or month_end is None:
+            return collection
+
+        if month_start <= month_end:
+            return collection.filter(
+                ee.Filter.calendarRange(month_start, month_end, "month")
+            )
+
+        return collection.filter(
+            ee.Filter.Or(
+                ee.Filter.calendarRange(month_start, 12, "month"),
+                ee.Filter.calendarRange(1, month_end, "month"),
+            )
+        )
+
     def _start_draw_bbox_ts(self):
         """Start drawing bounding box for Time Series tab."""
         self._bbox_drawing_mode = "ts"
@@ -2958,6 +3078,47 @@ class CatalogDockWidget(QDockWidget):
         date_layout.addRow("End Date:", self.ts_end_date)
 
         layout.addWidget(date_group)
+
+        # Month range filter group
+        month_filter_group = QGroupBox("Month Range Filter (Optional)")
+        month_filter_layout = QVBoxLayout(month_filter_group)
+
+        month_help = QLabel(
+            "Filter images to include only specific months across all years.\n"
+            "Useful for seasonal analysis (e.g., only summer months: 6-8)."
+        )
+        month_help.setStyleSheet("color: gray; font-size: 10px;")
+        month_help.setWordWrap(True)
+        month_filter_layout.addWidget(month_help)
+
+        month_range_layout = QHBoxLayout()
+
+        month_range_layout.addWidget(QLabel("From month:"))
+        self.ts_month_start_spin = QSpinBox()
+        self.ts_month_start_spin.setRange(1, 12)
+        self.ts_month_start_spin.setValue(1)
+        self.ts_month_start_spin.setToolTip("Start month (1=January, 12=December)")
+        month_range_layout.addWidget(self.ts_month_start_spin)
+
+        month_range_layout.addWidget(QLabel("To month:"))
+        self.ts_month_end_spin = QSpinBox()
+        self.ts_month_end_spin.setRange(1, 12)
+        self.ts_month_end_spin.setValue(12)
+        self.ts_month_end_spin.setToolTip("End month (1=January, 12=December)")
+        month_range_layout.addWidget(self.ts_month_end_spin)
+
+        month_range_layout.addStretch()
+        month_filter_layout.addLayout(month_range_layout)
+
+        self.ts_use_month_filter = QCheckBox("Apply month filter")
+        self.ts_use_month_filter.setChecked(False)
+        self.ts_use_month_filter.setToolTip(
+            "When checked, only images from the specified month range will be included.\n"
+            "Supports wrap-around ranges (e.g., 11-2 for Nov-Feb winter months)."
+        )
+        month_filter_layout.addWidget(self.ts_use_month_filter)
+
+        layout.addWidget(month_filter_group)
 
         # Filters group
         filters_group = QGroupBox("Filters")
@@ -7594,6 +7755,13 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
                 self.ts_property_filters.toPlainText()
             )
 
+            # Get month filter settings
+            month_start = None
+            month_end = None
+            if self.ts_use_month_filter.isChecked():
+                month_start = self.ts_month_start_spin.value()
+                month_end = self.ts_month_end_spin.value()
+
             self._show_progress(f"Creating time series for {asset_id}...")
 
             # Start background thread
@@ -7608,6 +7776,8 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
                 cloud_cover=cloud_cover,
                 cloud_property=cloud_property,
                 property_filters=property_filters,
+                month_start=month_start,
+                month_end=month_end,
             )
             self._timeseries_thread.finished.connect(self._on_timeseries_created)
             self._timeseries_thread.error.connect(self._on_timeseries_error)
@@ -7661,9 +7831,20 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
         property_filters = self._parse_property_filters(
             self.ts_property_filters.toPlainText()
         )
+        # Get month filter settings
+        month_start = None
+        month_end = None
+        if self.ts_use_month_filter.isChecked():
+            month_start = self.ts_month_start_spin.value()
+            month_end = self.ts_month_end_spin.value()
 
         try:
             # Create the time series collection using geemap's approach
+            date_strings = [
+                item["start_date"]
+                for item in images_data
+                if isinstance(item, dict) and item.get("start_date")
+            ]
             self._timeseries_collection = self._build_timeseries_collection(
                 asset_id=asset_id,
                 start_date=start_date,
@@ -7675,6 +7856,9 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
                 cloud_cover=cloud_cover,
                 cloud_property=cloud_property,
                 property_filters=property_filters,
+                month_start=month_start,
+                month_end=month_end,
+                date_strings=date_strings,
             )
 
             # Build visualization parameters
@@ -7948,6 +8132,9 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
         cloud_cover: int = None,
         cloud_property: str = "CLOUDY_PIXEL_PERCENTAGE",
         property_filters: list = None,
+        month_start: int = None,
+        month_end: int = None,
+        date_strings: list = None,
     ):
         """Build a time series ImageCollection.
 
@@ -7974,6 +8161,12 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
         if property_filters:
             collection = self._apply_property_filters(collection, property_filters)
 
+        # Apply month range filter if provided
+        if month_start is not None and month_end is not None:
+            collection = self._apply_month_range_filter(
+                collection, month_start, month_end
+            )
+
         if bands:
             collection = collection.select(bands)
 
@@ -7992,16 +8185,18 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
         start_dt = datetime.strptime(start_date, "%Y-%m-%d")
         end_dt = datetime.strptime(end_date, "%Y-%m-%d")
 
-        dates = []
-        current = start_dt
-        while current < end_dt:
-            dates.append(current.strftime("%Y-%m-%d"))
-            if unit == "day":
-                current += relativedelta(days=step)
-            elif unit == "month":
-                current += relativedelta(months=step)
-            elif unit == "year":
-                current += relativedelta(years=step)
+        dates = list(date_strings) if date_strings else []
+        if not dates:
+            current = start_dt
+            while current < end_dt:
+                if self._is_month_in_range(current.month, month_start, month_end):
+                    dates.append(current.strftime("%Y-%m-%d"))
+                if unit == "day":
+                    current += relativedelta(days=step)
+                elif unit == "month":
+                    current += relativedelta(months=step)
+                elif unit == "year":
+                    current += relativedelta(years=step)
 
         # Get reducer function
         reducer_func = getattr(ee.Reducer, reducer)()
@@ -8231,6 +8426,25 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
                 geometry = ee.Geometry.Rectangle(region, geodesic=False)
                 collection = collection.filterBounds(geometry)
 
+            # Apply property filters
+            property_filters = self._parse_property_filters(
+                self.ts_property_filters.toPlainText()
+            )
+            if property_filters:
+                collection = self._apply_property_filters(collection, property_filters)
+
+            # Get month filter settings
+            month_start = None
+            month_end = None
+
+            # Apply month filter if enabled
+            if self.ts_use_month_filter.isChecked():
+                month_start = self.ts_month_start_spin.value()
+                month_end = self.ts_month_end_spin.value()
+                collection = self._apply_month_range_filter(
+                    collection, month_start, month_end
+                )
+
             size = collection.size().getInfo()
 
             info_text = f"Asset: {asset_id}\n"
@@ -8263,13 +8477,30 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
             }
 
             delta = freq_dict.get(frequency, relativedelta(months=1))
+
+            def is_month_in_range(month):
+                return self._is_month_in_range(month, month_start, month_end)
+
             steps = 0
+            total_steps = 0
             current = start_dt
             while current < end_dt:
-                steps += 1
+                total_steps += 1
+                if is_month_in_range(current.month):
+                    steps += 1
                 current += delta
 
-            info_text += f"\nEstimated Time Steps ({frequency}): {steps}"
+            if month_start is not None and month_end is not None:
+                if month_start <= month_end:
+                    month_range_str = f"{month_start}-{month_end}"
+                else:
+                    month_range_str = f"{month_start}-{month_end} (wrap-around)"
+                info_text += f"\nMonth Filter: {month_range_str}"
+                info_text += (
+                    f"\nEstimated Time Steps ({frequency}): {steps} of {total_steps}"
+                )
+            else:
+                info_text += f"\nEstimated Time Steps ({frequency}): {steps}"
 
             QMessageBox.information(self, "Time Series Info", info_text)
 
@@ -8358,6 +8589,26 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
                     code_lines.append(
                         f"collection = collection.filter(ee.Filter.lte('{prop_name}', {value}))"
                     )
+            code_lines.append("")
+
+        # Add month filter
+        if self.ts_use_month_filter.isChecked():
+            month_start = self.ts_month_start_spin.value()
+            month_end = self.ts_month_end_spin.value()
+            code_lines.append("# Month range filter")
+            if month_start <= month_end:
+                code_lines.append(
+                    "collection = collection.filter("
+                    f"ee.Filter.calendarRange({month_start}, {month_end}, 'month')"
+                    ")"
+                )
+            else:
+                code_lines.append(
+                    "collection = collection.filter(ee.Filter.Or("
+                    f"ee.Filter.calendarRange({month_start}, 12, 'month'), "
+                    f"ee.Filter.calendarRange(1, {month_end}, 'month')"
+                    "))"
+                )
             code_lines.append("")
 
         # Build visualization params
