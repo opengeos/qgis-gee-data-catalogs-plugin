@@ -341,31 +341,97 @@ This creates a zip file ready for upload to the QGIS plugin repository.
 
 ## Troubleshooting
 
-If you encounter the error "Failed to initialize Google Earth Engine", you can try the following:
+### Authentication Issues
 
-### Method 1: Manually Authenticate Earth Engine in QGIS Python Console
+If you encounter authentication errors like "Failed to initialize Google Earth Engine" or "Request is missing required authentication credential", follow these steps:
 
-- Ensure you have an active Earth Engine account
-- Log in to your Earth Engine account at <https://code.earthengine.google.com> to get your Project ID
-- Open the QGIS Python Console (QGIS -> Plugins -> Python Console) and run the following Python code to authenticate and initialize Earth Engine. Make sure to replace `your-ee-project` with your actual Earth Engine Project ID.
+#### Step 1: Authenticate Earth Engine (Required - First Time Only)
+
+You must authenticate with Google Earth Engine before using the plugin. **Choose ONE of these methods:**
+
+**Method A: Authenticate via QGIS Python Console (Recommended)**
+
+1. Open QGIS Python Console: `Plugins > Python Console`
+2. Run the following commands:
 
 ```python
 import ee
 ee.Authenticate()
-ee.Initialize(project="your-ee-project")
 ```
+
+3. Follow the authentication instructions in your browser
+4. After successful authentication, close and reopen QGIS
+
+**Method B: Authenticate via Terminal**
+
+1. Open a terminal
+2. Run: `earthengine authenticate`
+3. Follow the authentication instructions in your browser
+4. After successful authentication, restart QGIS
 
 ![](https://github.com/user-attachments/assets/a7321180-1261-4c82-b545-9dbe676a864c)
 
-### Method 2: Set `EE_PROJECT_ID` Environment Variable
+#### Step 2: Configure Your Project ID (Required)
 
-- Set the `EE_PROJECT_ID` environment variable in your system or QGIS profile.
+After authentication, you must set your Google Cloud Project ID. **Choose ONE of these methods:**
+
+**Method A: Enter Project ID in Plugin Settings (Recommended)**
+
+1. Open the plugin's Settings panel
+2. Go to the "Earth Engine" tab
+3. Enter your Google Cloud Project ID
+4. Click "Save Settings"
+5. Click "Initialize Earth Engine" button
+
+![](https://github.com/user-attachments/assets/1a865934-2f40-4bbf-9b4c-a90b2a4a7dfa)
+
+**Method B: Set EE_PROJECT_ID Environment Variable**
+
+Set the `EE_PROJECT_ID` environment variable in your system or QGIS profile.
 
 ![](https://github.com/user-attachments/assets/952959df-5b13-44ec-a73d-cbb6b404d252)
 
-### Method 3: Enter Project ID in the **Settings** tab of the plugin
+#### Testing Your Setup
 
-![](https://github.com/user-attachments/assets/1a865934-2f40-4bbf-9b4c-a90b2a4a7dfa)
+To verify everything is working, run this diagnostic script in QGIS Python Console:
+
+```python
+# Copy the entire content of test_ee_auth.py from the plugin folder
+# Or run this quick test:
+import ee
+import os
+from qgis.PyQt.QtCore import QSettings
+
+# Check credentials
+creds_path = os.path.expanduser("~/.config/earthengine/credentials")
+print(f"Credentials exist: {os.path.exists(creds_path)}")
+
+# Get project ID from settings
+settings = QSettings()
+project_id = settings.value("GeeDataCatalogs/ee_project", "", type=str)
+print(f"Project ID from settings: {project_id}")
+
+# Test initialization
+if project_id:
+    ee.Initialize(project=project_id)
+    print("✓ Earth Engine initialized successfully!")
+else:
+    print("⚠ Please set your Project ID in Settings")
+```
+
+#### Common Issues
+
+1. **"Credentials not found"**: You need to run `ee.Authenticate()` first (Step 1)
+2. **"Failed to initialize"**: Make sure you've set your Project ID in Settings (Step 2)
+3. **"Invalid project"**: Verify your Project ID is correct and Earth Engine is enabled for that project
+4. **Still not working**: Try running `ee.Authenticate(force=True)` to re-authenticate
+
+#### Need Help?
+
+If you're still experiencing issues:
+1. Run the diagnostic script: `test_ee_auth.py` (found in the plugin folder)
+2. Check the QGIS message log: `View > Panels > Log Messages` (filter by "GEE Data Catalogs")
+3. Report issues at: https://github.com/opengeos/qgis-gee-data-catalogs-plugin/issues
 
 ## Related Projects
 

@@ -213,10 +213,48 @@ class GeeDataCatalogs:
     def _try_auto_init_ee(self):
         """Try to auto-initialize Earth Engine if EE_PROJECT_ID is set."""
         try:
-            from .core.ee_utils import try_auto_initialize_ee
+            from qgis.PyQt.QtCore import QSettings
+            from .core.ee_utils import initialize_ee, is_ee_initialized
 
-            if try_auto_initialize_ee():
-                pass
+            # Check if already initialized
+            if is_ee_initialized():
+                return
+
+            # Read project ID from settings
+            settings = QSettings()
+            project_id = settings.value("GeeDataCatalogs/ee_project", "", type=str)
+
+            # Strip whitespace and treat empty strings as None
+            project_source = None
+            if project_id:
+                project_id = project_id.strip()
+                if not project_id:  # Empty after stripping
+                    project_id = None
+                else:
+                    project_source = "settings"
+
+            # If no project ID in settings, fall back to environment variable
+            if not project_id:
+                import os
+
+                project_id = os.environ.get("EE_PROJECT_ID", None)
+                if project_id:
+                    project_source = "EE_PROJECT_ID environment variable"
+
+            # Only try to initialize if we have a project ID
+            if project_id:
+                try:
+                    from qgis.core import QgsMessageLog, Qgis
+
+                    QgsMessageLog.logMessage(
+                        f"Auto-initializing Earth Engine with project from {project_source}: {project_id}",
+                        "GEE Data Catalogs",
+                        Qgis.Info,
+                    )
+                    initialize_ee(project=project_id)
+                except Exception:
+                    # Silently fail - user can manually initialize
+                    pass
         except Exception:
             # Silently fail - user can manually initialize
             pass
@@ -263,7 +301,6 @@ class GeeDataCatalogs:
         try:
             from .core.ee_utils import (
                 is_ee_initialized,
-                try_auto_initialize_ee,
                 refresh_all_ee_layers,
                 is_ee_layer,
             )
@@ -282,7 +319,45 @@ class GeeDataCatalogs:
 
             # Try to initialize EE if not already initialized
             if not is_ee_initialized():
-                if not try_auto_initialize_ee():
+                from qgis.PyQt.QtCore import QSettings
+                from .core.ee_utils import initialize_ee as init_ee_core
+
+                # Read project ID from settings
+                settings = QSettings()
+                project_id = settings.value("GeeDataCatalogs/ee_project", "", type=str)
+
+                # Strip whitespace and treat empty strings as None
+                project_source = None
+                if project_id:
+                    project_id = project_id.strip()
+                    if not project_id:  # Empty after stripping
+                        project_id = None
+                    else:
+                        project_source = "plugin settings"
+
+                # If no project ID in settings, fall back to environment variable
+                if not project_id:
+                    project_id = os.environ.get("EE_PROJECT_ID", None)
+                    if project_id:
+                        project_source = "EE_PROJECT_ID environment variable"
+
+                # Try to initialize
+                initialized = False
+                if project_id:
+                    try:
+                        from qgis.core import QgsMessageLog, Qgis
+
+                        QgsMessageLog.logMessage(
+                            f"Initializing Earth Engine for project layers (using project from {project_source}): {project_id}",
+                            "GEE Data Catalogs",
+                            Qgis.Info,
+                        )
+                        init_ee_core(project=project_id)
+                        initialized = True
+                    except Exception:
+                        pass
+
+                if not initialized:
                     self.iface.messageBar().pushWarning(
                         "GEE Data Catalogs",
                         f"Found {len(ee_layers)} Earth Engine layer(s) but EE is not initialized. "
@@ -321,12 +396,35 @@ class GeeDataCatalogs:
     def initialize_ee(self):
         """Initialize Google Earth Engine."""
         try:
+            from qgis.PyQt.QtCore import QSettings
             from .core.ee_utils import initialize_ee
 
-            initialize_ee()
-            self.iface.messageBar().pushSuccess(
-                "GEE Data Catalogs", "Earth Engine initialized successfully!"
-            )
+            # Read project ID from settings
+            settings = QSettings()
+            project_id = settings.value("GeeDataCatalogs/ee_project", "", type=str)
+
+            # Strip whitespace and treat empty strings as None
+            project_source = None
+            if project_id:
+                project_id = project_id.strip()
+                if not project_id:  # Empty after stripping
+                    project_id = None
+                else:
+                    project_source = "plugin settings"
+
+            # If no project ID in settings, fall back to environment variable
+            if not project_id:
+                project_id = os.environ.get("EE_PROJECT_ID", None)
+                if project_id:
+                    project_source = "EE_PROJECT_ID environment variable"
+
+            # Initialize with project ID
+            initialize_ee(project=project_id if project_id else None)
+
+            success_msg = "Earth Engine initialized successfully!"
+            if project_source:
+                success_msg += f" (using project from {project_source})"
+            self.iface.messageBar().pushSuccess("GEE Data Catalogs", success_msg)
         except ImportError as e:
             QMessageBox.critical(
                 self.iface.mainWindow(),
