@@ -87,9 +87,13 @@ def remove_plugin(plugin_dir: Path, plugin_name: str = "gee_data_catalogs") -> b
 
     if target_dir.exists():
         print(f"Removing plugin: {target_dir}")
-        shutil.rmtree(target_dir)
-        print("Plugin removed successfully.")
-        return True
+        try:
+            shutil.rmtree(target_dir)
+            print("Plugin removed successfully.")
+            return True
+        except (OSError, PermissionError) as e:
+            print(f"Failed to remove plugin: {e}")
+            return False
     else:
         print("Plugin not found. Nothing to remove.")
         return False
