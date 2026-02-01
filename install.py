@@ -44,7 +44,7 @@ def get_qgis_plugin_dir() -> Path:
 
 
 def install_plugin(
-    source_dir: Path, plugin_dir: Path, plugin_name: str = "gee_data_catalogs"
+        source_dir: Path, plugin_dir: Path, plugin_name: str = "gee_data_catalogs", overwrite: bool = True
 ) -> bool:
     """Install the plugin to the QGIS plugins directory.
 
@@ -52,25 +52,46 @@ def install_plugin(
         source_dir: Path to the plugin source directory.
         plugin_dir: Path to the QGIS plugins directory.
         plugin_name: Name of the plugin folder in QGIS plugins directory.
+        overwrite: Whether to overwrite existing installation. Default are True
 
     Returns:
         True if installation was successful, False otherwise.
+
+    Raises:
+        FileNotFoundError: If source_dir doesn't exist.
+        PermissionError: If inssufficient permission to copy files.
+        OSError: If other filesystem errors occur.
     """
-    target_dir = plugin_dir / plugin_name
+    try:
+        if not source_dir.exists():
+            print(f"Source directory not found: {source_dir}")
+        
+        if not source_dir.is_dir():
+            print(f"Source path is not a directory: {source_dir}")
 
-    # Create plugin directory if it doesn't exist
-    plugin_dir.mkdir(parents=True, exist_ok=True)
+        # Create plugin directory if it doesn't exist
+        plugin_dir.mkdir(parents=True, exist_ok=True)
+        
+        target_dir = plugin_dir / plugin_name
 
-    # Remove existing installation
-    if target_dir.exists():
-        print(f"Removing existing installation: {target_dir}")
-        shutil.rmtree(target_dir)
+        # Remove existing installation
+        if target_dir.exists():
+            if overwrite:
+                print(f"Removing existing installation: {target_dir}")
+                shutil.rmtree(target_dir)
+            else:
+                print(f"Plugin already exist and overwrite=False: {target_dir}")
+                return False
 
-    # Copy plugin
-    print(f"Installing plugin to: {target_dir}")
-    shutil.copytree(source_dir, target_dir)
+        # Copy plugin
+        print(f"Installing plugin to: {target_dir}")
+        shutil.copytree(source_dir, target_dir)
 
-    return True
+        return True
+    
+    except (FileNotFoundError, PermissionError, OSError, ValueError) as e:
+        print(f"Failed to installing plugin: {e}")
+        return False
 
 
 def remove_plugin(plugin_dir: Path, plugin_name: str = "gee_data_catalogs") -> bool:
