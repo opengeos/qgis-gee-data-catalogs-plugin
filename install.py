@@ -83,7 +83,7 @@ def install_plugin(
                 print(f"Removing existing installation: {target_dir}")
                 shutil.rmtree(target_dir)
             else:
-                print(f"Plugin already exist and overwrite=False: {target_dir}")
+                print(f"Plugin already exists and overwrite=False: {target_dir}")
                 return False
 
         # Copy plugin
