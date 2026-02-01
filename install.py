@@ -55,7 +55,7 @@ def install_plugin(
         source_dir: Path to the plugin source directory.
         plugin_dir: Path to the QGIS plugins directory.
         plugin_name: Name of the plugin folder in QGIS plugins directory.
-        overwrite: Whether to overwrite existing installation. Default are True
+        overwrite: Whether to overwrite existing installation. Default is True
 
     Returns:
         True if installation was successful, False otherwise.
