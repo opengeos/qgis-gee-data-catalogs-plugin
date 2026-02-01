@@ -93,7 +93,7 @@ def install_plugin(
         return True
 
     except (FileNotFoundError, PermissionError, OSError, ValueError) as e:
-        print(f"Failed to installing plugin: {e}")
+        print(f"Failed to install plugin: {e}")
         return False
 
 
