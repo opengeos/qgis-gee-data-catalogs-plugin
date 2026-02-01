@@ -44,7 +44,10 @@ def get_qgis_plugin_dir() -> Path:
 
 
 def install_plugin(
-        source_dir: Path, plugin_dir: Path, plugin_name: str = "gee_data_catalogs", overwrite: bool = True
+    source_dir: Path,
+    plugin_dir: Path,
+    plugin_name: str = "gee_data_catalogs",
+    overwrite: bool = True,
 ) -> bool:
     """Install the plugin to the QGIS plugins directory.
 
@@ -65,13 +68,13 @@ def install_plugin(
     try:
         if not source_dir.exists():
             print(f"Source directory not found: {source_dir}")
-        
+
         if not source_dir.is_dir():
             print(f"Source path is not a directory: {source_dir}")
 
         # Create plugin directory if it doesn't exist
         plugin_dir.mkdir(parents=True, exist_ok=True)
-        
+
         target_dir = plugin_dir / plugin_name
 
         # Remove existing installation
@@ -88,7 +91,7 @@ def install_plugin(
         shutil.copytree(source_dir, target_dir)
 
         return True
-    
+
     except (FileNotFoundError, PermissionError, OSError, ValueError) as e:
         print(f"Failed to installing plugin: {e}")
         return False
