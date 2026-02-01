@@ -62,7 +62,7 @@ def install_plugin(
 
     Raises:
         FileNotFoundError: If source_dir doesn't exist.
-        PermissionError: If inssufficient permission to copy files.
+        PermissionError: If insufficient permission to copy files.
         OSError: If other filesystem errors occur.
     """
     try:
