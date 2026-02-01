@@ -58,12 +58,9 @@ def install_plugin(
         overwrite: Whether to overwrite existing installation. Default is True
 
     Returns:
-        True if installation was successful, False otherwise.
-
-    Raises:
-        FileNotFoundError: If source_dir doesn't exist.
-        PermissionError: If insufficient permission to copy files.
-        OSError: If other filesystem errors occur.
+        True if installation was successful, False otherwise (for example, if
+        the source directory is missing, permissions are insufficient, or
+        other filesystem errors occur).
     """
     try:
         if not source_dir.exists():
