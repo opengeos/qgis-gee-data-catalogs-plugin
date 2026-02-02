@@ -127,7 +127,9 @@ def main():
     source_dir = script_dir / "gee_data_catalogs"
 
     if not args.remove and not source_dir.exists():
-        print(f"Error: Plugin source directory not found: {source_dir}", file=sys.stderr)
+        print(
+            f"Error: Plugin source directory not found: {source_dir}", file=sys.stderr
+        )
         return 1
 
     # Get plugin directory
@@ -170,6 +172,7 @@ def main():
             print("=" * 60)
             print()
             return 1
+
 
 if __name__ == "__main__":
     sys.exit(main())
