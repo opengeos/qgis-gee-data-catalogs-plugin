@@ -44,7 +44,7 @@ main() {
 
   echo "proceed to install $PLUGIN_NAME"
   data_check
-  
+
   if [[ ! -f "$INSTALLER_PYTHON" ]]; then
     echo "Installer script not found at: $INSTALLER_PYTHON"
   fi
