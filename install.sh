@@ -15,17 +15,24 @@ readonly PLUGIN_NAME="gee_data_catalogs"
 readonly INSTALLER_PYTHON="$SCRIPT_DIR/install.py"
 
 help_message() {
-  echo "GEE Data Catalogs Plugin Installer for QGIS"
-  echo
-  echo "Usage: $0 [options]"
-  echo
-  echo "Options:"
-  echo " [no args]    Install plugin"
-  echo " --remove     Remove plugin"
-  echo " -h, --help   Show this help message"
-  echo
-  echo "Example: $0 --remove # to remove"
-  echo "         $0          # to install"
+  # Delegate to the Python installer help if available, so all supported
+  # options (e.g., --plugin-dir, --name) are documented consistently.
+  if command -v python3 >/dev/null 2>&1 && [[ -f "$INSTALLER_PYTHON" ]]; then
+    python3 "$INSTALLER_PYTHON" --help
+  else
+    # Fallback minimal help if python3 or the installer script is unavailable.
+    echo "GEE Data Catalogs Plugin Installer for QGIS"
+    echo
+    echo "Usage: $0 [options]"
+    echo
+    echo "Options:"
+    echo " [no args]    Install plugin"
+    echo " --remove     Remove plugin"
+    echo " -h, --help   Show this help message"
+    echo
+    echo "Example: $0 --remove # to remove"
+    echo "         $0          # to install"
+  fi
 }
 
 data_check() {
