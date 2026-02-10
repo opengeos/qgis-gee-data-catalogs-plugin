@@ -31,7 +31,7 @@ help_message() {
 data_check() {
   echo "Check for python"
   if ! command -v python3 &> /dev/null; then
-    echo "Python is not install or not in your PATH, install it to continue"
+    echo "Python is not installed or not in your PATH, install it to continue"
     return 1
   fi
   echo "Python ready"
