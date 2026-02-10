@@ -43,7 +43,12 @@ main() {
     exit 0
   fi
 
-  echo "proceed to install $PLUGIN_NAME"
+  if [[ "${1:-}" == "--remove" ]]; then
+    action="remove"
+  else
+    action="install"
+  fi
+  echo "proceed to $action $PLUGIN_NAME"
   data_check
 
   if [[ ! -f "$INSTALLER_PYTHON" ]]; then
