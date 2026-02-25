@@ -184,9 +184,8 @@ def main():
             print("  2. Go to Plugins -> Manage and Install Plugins...")
             print(f"  3. Enable '{args.name}'")
             print()
-            print("Note: Make sure you have the following dependencies installed:")
-            print("  - earthengine-api: pip install earthengine-api")
-            print("  - qgis-geemap-plugin (recommended for full functionality)")
+            print("Dependencies (earthengine-api) will be installed")
+            print("automatically when you first use the plugin.")
             return 0
         else:
             print("=" * 60)

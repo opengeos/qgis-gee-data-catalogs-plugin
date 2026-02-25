@@ -32,6 +32,9 @@ class GeeDataCatalogs:
         self._catalog_dock = None
         self._settings_dock = None
 
+        # Dependency status (checked lazily on first button click)
+        self._deps_ready = False
+
     def add_action(
         self,
         icon_path,
@@ -143,9 +146,6 @@ class GeeDataCatalogs:
         # Add separator to menu
         self.menu.addSeparator()
 
-        # Try to auto-initialize Earth Engine
-        self._try_auto_init_ee()
-
         # Update icon
         update_icon = ":/images/themes/default/mActionRefresh.svg"
 
@@ -180,12 +180,12 @@ class GeeDataCatalogs:
         # Disconnect project signals
         try:
             QgsProject.instance().layersRemoved.disconnect(self._on_layers_removed)
-        except Exception:
-            pass
+        except (TypeError, RuntimeError):
+            pass  # Signal was not connected
         try:
             QgsProject.instance().readProject.disconnect(self._on_project_read)
-        except Exception:
-            pass
+        except (TypeError, RuntimeError):
+            pass  # Signal was not connected
 
         # Remove dock widgets
         if self._catalog_dock:
@@ -209,6 +209,45 @@ class GeeDataCatalogs:
         # Remove menu
         if self.menu:
             self.menu.deleteLater()
+
+    def _ensure_dependencies(self, callback):
+        """Check dependencies and run callback if ready, otherwise show install dialog.
+
+        Args:
+            callback: The function to call once dependencies are confirmed available.
+        """
+        # Fast path: already verified this session
+        if self._deps_ready:
+            callback()
+            return
+
+        from .core.venv_manager import get_venv_status, ensure_venv_packages_available
+
+        is_ready, status_msg = get_venv_status()
+
+        if is_ready:
+            ensure_venv_packages_available()
+            self._deps_ready = True
+            self._try_auto_init_ee()
+            callback()
+            return
+
+        # Dependencies not ready -- show install dialog
+        from .dialogs.dependency_dialog import DependencyDialog
+
+        dialog = DependencyDialog(self.iface.mainWindow())
+
+        def on_success():
+            ensure_venv_packages_available()
+            self._deps_ready = True
+            self._try_auto_init_ee()
+
+        dialog.install_succeeded.connect(on_success)
+        result = dialog.exec_()
+
+        # Only proceed with callback if installation succeeded
+        if self._deps_ready:
+            callback()
 
     def _try_auto_init_ee(self):
         """Try to auto-initialize Earth Engine if EE_PROJECT_ID is set."""
@@ -235,8 +274,6 @@ class GeeDataCatalogs:
 
             # If no project ID in settings, fall back to environment variable
             if not project_id:
-                import os
-
                 project_id = os.environ.get("EE_PROJECT_ID", None)
                 if project_id:
                     project_source = "EE_PROJECT_ID environment variable"
@@ -252,11 +289,16 @@ class GeeDataCatalogs:
                         Qgis.Info,
                     )
                     initialize_ee(project=project_id)
-                except Exception:
-                    # Silently fail - user can manually initialize
-                    pass
-        except Exception:
-            # Silently fail - user can manually initialize
+                except Exception as exc:
+                    from qgis.core import QgsMessageLog, Qgis
+
+                    QgsMessageLog.logMessage(
+                        f"Auto-init EE failed: {exc}",
+                        "GEE Data Catalogs",
+                        Qgis.Warning,
+                    )
+        except ImportError:
+            # Dependencies not yet available - user can manually initialize
             pass
 
     def _on_layers_removed(self, layer_ids):
@@ -285,8 +327,8 @@ class GeeDataCatalogs:
             # Update inspector layer count if catalog dock is visible
             if self._catalog_dock:
                 self._catalog_dock._refresh_inspector_layers()
-        except Exception:
-            # Silently fail to avoid disrupting layer removal
+        except (ImportError, AttributeError):
+            # Dependencies not loaded or EE utils not available yet
             pass
 
     def _on_project_read(self, doc):
@@ -354,8 +396,12 @@ class GeeDataCatalogs:
                         )
                         init_ee_core(project=project_id)
                         initialized = True
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        QgsMessageLog.logMessage(
+                            f"EE init for project layers failed: {exc}",
+                            "GEE Data Catalogs",
+                            Qgis.Warning,
+                        )
 
                 if not initialized:
                     self.iface.messageBar().pushWarning(
@@ -394,7 +440,11 @@ class GeeDataCatalogs:
             )
 
     def initialize_ee(self):
-        """Initialize Google Earth Engine."""
+        """Initialize Google Earth Engine (with dependency gate)."""
+        self._ensure_dependencies(self._do_initialize_ee)
+
+    def _do_initialize_ee(self):
+        """Perform the actual EE initialization after dependencies are ready."""
         try:
             from qgis.PyQt.QtCore import QSettings
             from .core.ee_utils import initialize_ee
@@ -429,8 +479,7 @@ class GeeDataCatalogs:
             QMessageBox.critical(
                 self.iface.mainWindow(),
                 "Error",
-                f"Earth Engine API not found. Please install earthengine-api:\n\n"
-                f"pip install earthengine-api\n\nError: {str(e)}",
+                f"Earth Engine API not found:\n\n{str(e)}",
             )
         except Exception as e:
             QMessageBox.critical(
@@ -441,76 +490,80 @@ class GeeDataCatalogs:
             )
 
     def toggle_catalog_dock(self):
-        """Toggle the Catalog dock widget visibility."""
-        if self._catalog_dock is None:
-            try:
-                from .dialogs.catalog_dock import CatalogDockWidget
-
-                self._catalog_dock = CatalogDockWidget(
-                    self.iface, self.iface.mainWindow()
-                )
-                self._catalog_dock.setObjectName("GeeDataCatalogsDock")
-                self._catalog_dock.visibilityChanged.connect(
-                    self._on_catalog_visibility_changed
-                )
-                self.iface.addDockWidget(Qt.RightDockWidgetArea, self._catalog_dock)
+        """Toggle the Catalog dock widget visibility (with dependency gate)."""
+        # If dock already exists, just toggle visibility (no dep check needed)
+        if self._catalog_dock is not None:
+            if self._catalog_dock.isVisible():
+                self._catalog_dock.hide()
+            else:
                 self._catalog_dock.show()
                 self._catalog_dock.raise_()
-                return
+            return
 
-            except Exception as e:
-                QMessageBox.critical(
-                    self.iface.mainWindow(),
-                    "Error",
-                    f"Failed to create Catalog panel:\n{str(e)}",
-                )
-                self.catalog_action.setChecked(False)
-                return
+        # First open -- ensure dependencies before creating the dock
+        self._ensure_dependencies(self._create_catalog_dock)
 
-        # Toggle visibility
-        if self._catalog_dock.isVisible():
-            self._catalog_dock.hide()
-        else:
+    def _create_catalog_dock(self):
+        """Create and show the catalog dock (called after deps are ready)."""
+        try:
+            from .dialogs.catalog_dock import CatalogDockWidget
+
+            self._catalog_dock = CatalogDockWidget(self.iface, self.iface.mainWindow())
+            self._catalog_dock.setObjectName("GeeDataCatalogsDock")
+            self._catalog_dock.visibilityChanged.connect(
+                self._on_catalog_visibility_changed
+            )
+            self.iface.addDockWidget(Qt.RightDockWidgetArea, self._catalog_dock)
             self._catalog_dock.show()
             self._catalog_dock.raise_()
+        except Exception as e:
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                "Error",
+                f"Failed to create Catalog panel:\n{str(e)}",
+            )
+            self.catalog_action.setChecked(False)
 
     def _on_catalog_visibility_changed(self, visible):
         """Handle Catalog dock visibility change."""
         self.catalog_action.setChecked(visible)
 
     def toggle_settings_dock(self):
-        """Toggle the Settings dock widget visibility."""
-        if self._settings_dock is None:
-            try:
-                from .dialogs.settings_dock import SettingsDockWidget
-
-                self._settings_dock = SettingsDockWidget(
-                    self.iface, self.iface.mainWindow()
-                )
-                self._settings_dock.setObjectName("GeeDataCatalogsSettingsDock")
-                self._settings_dock.visibilityChanged.connect(
-                    self._on_settings_visibility_changed
-                )
-                self.iface.addDockWidget(Qt.RightDockWidgetArea, self._settings_dock)
+        """Toggle the Settings dock widget visibility (with dependency gate)."""
+        # If dock already exists, just toggle visibility (no dep check needed)
+        if self._settings_dock is not None:
+            if self._settings_dock.isVisible():
+                self._settings_dock.hide()
+            else:
                 self._settings_dock.show()
                 self._settings_dock.raise_()
-                return
+            return
 
-            except Exception as e:
-                QMessageBox.critical(
-                    self.iface.mainWindow(),
-                    "Error",
-                    f"Failed to create Settings panel:\n{str(e)}",
-                )
-                self.settings_action.setChecked(False)
-                return
+        # First open -- ensure dependencies before creating the dock
+        self._ensure_dependencies(self._create_settings_dock)
 
-        # Toggle visibility
-        if self._settings_dock.isVisible():
-            self._settings_dock.hide()
-        else:
+    def _create_settings_dock(self):
+        """Create and show the settings dock (called after deps are ready)."""
+        try:
+            from .dialogs.settings_dock import SettingsDockWidget
+
+            self._settings_dock = SettingsDockWidget(
+                self.iface, self.iface.mainWindow()
+            )
+            self._settings_dock.setObjectName("GeeDataCatalogsSettingsDock")
+            self._settings_dock.visibilityChanged.connect(
+                self._on_settings_visibility_changed
+            )
+            self.iface.addDockWidget(Qt.RightDockWidgetArea, self._settings_dock)
             self._settings_dock.show()
             self._settings_dock.raise_()
+        except Exception as e:
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                "Error",
+                f"Failed to create Settings panel:\n{str(e)}",
+            )
+            self.settings_action.setChecked(False)
 
     def _on_settings_visibility_changed(self, visible):
         """Handle Settings dock visibility change."""
