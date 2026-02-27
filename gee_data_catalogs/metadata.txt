@@ -2,7 +2,7 @@
 name=Earth Engine Data Catalogs
 qgisMinimumVersion=3.28
 description=Browse, search, and load Google Earth Engine data catalogs directly in QGIS.
-version=0.8.0
+version=0.9.0
 author=Qiusheng Wu
 email=giswqs@gmail.com
 
@@ -36,6 +36,8 @@ experimental=False
 deprecated=False
 
 changelog=
+    0.9.0
+        - Fix Windows install launching QGIS, use uv and dockable panel 
     0.8.0
         - Add one-click dependency installer
     0.7.0
