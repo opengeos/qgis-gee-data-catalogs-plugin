@@ -5483,7 +5483,9 @@ class CatalogDockWidget(QDockWidget):
                     continue
 
                 cat_item = QTreeWidgetItem([f"{category} ({len(datasets)})", "", ""])
-                cat_item.setFont(0, QFont("", -1, QFont.Bold))
+                bold_font = QFont(self.catalog_tree.font())
+                bold_font.setBold(True)
+                cat_item.setFont(0, bold_font)
 
                 for dataset in datasets:
                     source = dataset.get("source", "unknown")
@@ -5941,9 +5943,13 @@ for f in data['features']:
                     ee_object = ee.FeatureCollection(asset_id)
                     ee_object.size().getInfo()  # Verify it works
                     actual_type = "FeatureCollection"
-            except Exception:
-                # Catalog type was wrong, auto-detect
-                pass
+            except Exception as type_err:
+                # Catalog type was wrong or API call failed, auto-detect
+                QgsMessageLog.logMessage(
+                    f"Loading as {catalog_type} failed for {asset_id}: {type_err}",
+                    "GEE Data Catalogs",
+                    Qgis.Warning,
+                )
 
             # If loading based on catalog type failed, auto-detect
             if ee_object is None:
@@ -7283,7 +7289,9 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
         # Display results in tree
         for layer_name, data in results.items():
             layer_item = QTreeWidgetItem([layer_name, ""])
-            layer_item.setFont(0, QFont("", -1, QFont.Bold))
+            bold_font = QFont(self.inspector_tree.font())
+            bold_font.setBold(True)
+            layer_item.setFont(0, bold_font)
 
             if data.get("type") == "Error":
                 error_item = QTreeWidgetItem(
