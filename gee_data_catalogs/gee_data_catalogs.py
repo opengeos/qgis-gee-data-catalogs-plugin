@@ -588,6 +588,7 @@ class GeeDataCatalogs:
             self._settings_dock.visibilityChanged.connect(
                 self._on_settings_visibility_changed
             )
+            self._settings_dock.settings_saved.connect(self._try_auto_init_ee)
             self.iface.addDockWidget(Qt.RightDockWidgetArea, self._settings_dock)
             self._settings_dock.show()
             self._settings_dock.raise_()

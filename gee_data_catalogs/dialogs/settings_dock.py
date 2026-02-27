@@ -4,7 +4,7 @@ Settings Dock Widget for GEE Data Catalogs
 This module provides a settings panel for configuring plugin options.
 """
 
-from qgis.PyQt.QtCore import Qt, QSettings
+from qgis.PyQt.QtCore import Qt, QSettings, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QDockWidget,
     QWidget,
@@ -27,6 +27,8 @@ from qgis.PyQt.QtGui import QFont
 
 class SettingsDockWidget(QDockWidget):
     """A settings panel for configuring plugin options."""
+
+    settings_saved = pyqtSignal()
 
     # Settings keys
     SETTINGS_PREFIX = "GeeDataCatalogs/"
@@ -412,6 +414,7 @@ class SettingsDockWidget(QDockWidget):
         self.iface.messageBar().pushSuccess(
             "GEE Data Catalogs", "Settings saved successfully!"
         )
+        self.settings_saved.emit()
 
     def _reset_defaults(self):
         """Reset all settings to defaults."""
