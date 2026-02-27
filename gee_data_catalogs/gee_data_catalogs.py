@@ -31,9 +31,12 @@ class GeeDataCatalogs:
         # Dock widgets (lazy loaded)
         self._catalog_dock = None
         self._settings_dock = None
+        self._deps_dock = None
 
         # Dependency status (checked lazily on first button click)
         self._deps_ready = False
+        # Pending callback to invoke after deps are installed
+        self._pending_callback = None
 
     def add_action(
         self,
@@ -198,6 +201,11 @@ class GeeDataCatalogs:
             self._settings_dock.deleteLater()
             self._settings_dock = None
 
+        if self._deps_dock:
+            self.iface.removeDockWidget(self._deps_dock)
+            self._deps_dock.deleteLater()
+            self._deps_dock = None
+
         # Remove actions from menu
         for action in self.actions:
             self.iface.removePluginMenu("&GEE Data Catalogs", action)
@@ -211,7 +219,7 @@ class GeeDataCatalogs:
             self.menu.deleteLater()
 
     def _ensure_dependencies(self, callback):
-        """Check dependencies and run callback if ready, otherwise show install dialog.
+        """Check dependencies and run callback if ready, otherwise show deps dock.
 
         Args:
             callback: The function to call once dependencies are confirmed available.
@@ -221,7 +229,7 @@ class GeeDataCatalogs:
             callback()
             return
 
-        from .core.venv_manager import get_venv_status, ensure_venv_packages_available
+        from .core.venv_manager import ensure_venv_packages_available, get_venv_status
 
         is_ready, status_msg = get_venv_status()
 
@@ -232,21 +240,39 @@ class GeeDataCatalogs:
             callback()
             return
 
-        # Dependencies not ready -- show install dialog
-        from .dialogs.dependency_dialog import DependencyDialog
+        # Dependencies not ready -- show the deps dock and save callback
+        self._pending_callback = callback
+        self._open_deps_dock()
+        self.iface.messageBar().pushWarning(
+            "GEE Data Catalogs",
+            "Dependencies not installed. Please install them from the Dependencies panel.",
+        )
 
-        dialog = DependencyDialog(self.iface.mainWindow())
+    def _open_deps_dock(self):
+        """Create/show the dependency installation dock widget."""
+        if self._deps_dock is None:
+            from .dialogs.dependency_dialog import DependencyDockWidget
 
-        def on_success():
-            ensure_venv_packages_available()
-            self._deps_ready = True
-            self._try_auto_init_ee()
+            self._deps_dock = DependencyDockWidget(self.iface, self.iface.mainWindow())
+            self._deps_dock.setObjectName("GeeDataCatalogsDeps")
+            self.iface.addDockWidget(Qt.RightDockWidgetArea, self._deps_dock)
+            self._deps_dock.install_succeeded.connect(self._on_deps_installed)
 
-        dialog.install_succeeded.connect(on_success)
-        result = dialog.exec_()
+        self._deps_dock.show()
+        self._deps_dock.raise_()
 
-        # Only proceed with callback if installation succeeded
-        if self._deps_ready:
+    def _on_deps_installed(self):
+        """Handle successful dependency installation from the dock."""
+        from .core.venv_manager import ensure_venv_packages_available
+
+        ensure_venv_packages_available()
+        self._deps_ready = True
+        self._try_auto_init_ee()
+
+        # Execute the pending callback if one is waiting
+        if self._pending_callback is not None:
+            callback = self._pending_callback
+            self._pending_callback = None
             callback()
 
     def _try_auto_init_ee(self):

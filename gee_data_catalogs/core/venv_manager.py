@@ -1,34 +1,30 @@
 """
-Virtual Environment Manager for GEE Data Catalogs
+Virtual Environment Manager for GEE Data Catalogs Plugin.
 
-This module handles creating and managing an isolated Python virtual environment
-for plugin dependencies (earthengine-api). The venv is stored externally at
-~/.qgis_gee_data_catalogs/ so it persists across plugin reinstalls.
+Creates and manages an isolated virtual environment for installing
+the plugin's Python dependencies (earthengine-api) without
+modifying QGIS's built-in Python environment.
 """
 
-import hashlib
+import importlib
+import importlib.metadata
 import os
 import platform
 import shutil
-import subprocess  # nosec B404 — used with hardcoded commands only, no user input
+import subprocess  # nosec B404
 import sys
+import time
 from typing import Callable, List, Optional, Tuple
 
-from qgis.core import QgsMessageLog, Qgis
+from qgis.core import Qgis, QgsMessageLog
 
 PLUGIN_NAME = "GEE Data Catalogs"
-PYTHON_VERSION = f"py{sys.version_info.major}.{sys.version_info.minor}"
-VENV_BASE_DIR = os.path.expanduser("~/.qgis_gee_data_catalogs")
-VENV_DIR = os.path.join(VENV_BASE_DIR, f"venv_{PYTHON_VERSION}")
+CACHE_DIR = os.path.expanduser("~/.qgis_gee_data_catalogs")
+VENV_DIR = os.path.join(CACHE_DIR, "venv")
 
 REQUIRED_PACKAGES = [
     ("earthengine-api", ">=1.4.0"),
 ]
-
-DEPS_HASH_FILE = os.path.join(VENV_DIR, "deps_hash.txt")
-
-# Bump this when install logic changes significantly to force a re-install.
-_INSTALL_LOGIC_VERSION = "1"
 
 
 def _log(message: str, level=Qgis.Info):
@@ -38,168 +34,836 @@ def _log(message: str, level=Qgis.Info):
         message: The message to log.
         level: The log level (Qgis.Info, Qgis.Warning, Qgis.Critical).
     """
-    QgsMessageLog.logMessage(message, PLUGIN_NAME, level=level)
+    QgsMessageLog.logMessage(str(message), PLUGIN_NAME, level=level)
 
 
 # ---------------------------------------------------------------------------
-# Hash-based invalidation
+# Environment helpers
 # ---------------------------------------------------------------------------
 
 
-def _compute_deps_hash() -> str:
-    """Compute MD5 hash of REQUIRED_PACKAGES + install logic version.
+def _get_clean_env_for_venv() -> dict:
+    """Create a clean environment dict for subprocess calls.
+
+    Strips QGIS-specific variables that would interfere with the
+    standalone Python or venv operations.
 
     Returns:
-        The hex digest of the hash.
+        A dict of environment variables.
     """
-    data = repr(REQUIRED_PACKAGES).encode("utf-8")
-    data += _INSTALL_LOGIC_VERSION.encode("utf-8")
-    return hashlib.md5(data, usedforsecurity=False).hexdigest()
+    env = os.environ.copy()
+    vars_to_remove = [
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "VIRTUAL_ENV",
+        "QGIS_PREFIX_PATH",
+        "QGIS_PLUGINPATH",
+        "PROJ_DATA",
+        "PROJ_LIB",
+        "GDAL_DATA",
+        "GDAL_DRIVER_PATH",
+    ]
+    for var in vars_to_remove:
+        env.pop(var, None)
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
 
 
-def _read_deps_hash() -> Optional[str]:
-    """Read stored deps hash from the venv directory.
+def _get_subprocess_kwargs() -> dict:
+    """Get platform-specific subprocess kwargs.
+
+    On Windows, suppresses the console window that would otherwise pop up
+    for each subprocess invocation.
 
     Returns:
-        The stored hash string, or None if not found.
+        A dict of keyword arguments for subprocess.run.
     """
-    try:
-        with open(DEPS_HASH_FILE, "r", encoding="utf-8") as f:
-            return f.read().strip()
-    except (OSError, IOError):
-        return None
-
-
-def _write_deps_hash():
-    """Write the current deps hash to the venv directory."""
-    try:
-        os.makedirs(os.path.dirname(DEPS_HASH_FILE), exist_ok=True)
-        with open(DEPS_HASH_FILE, "w", encoding="utf-8") as f:
-            f.write(_compute_deps_hash())
-    except (OSError, IOError) as e:
-        _log(f"Failed to write deps hash: {e}", Qgis.Warning)
+    if platform.system() == "Windows":
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {}
 
 
 # ---------------------------------------------------------------------------
-# Platform-aware path helpers
+# Path helpers
 # ---------------------------------------------------------------------------
 
 
 def get_venv_python_path(venv_dir: str = None) -> str:
-    """Get the Python executable path within the venv.
+    """Get the path to the Python executable inside the venv.
 
     Args:
-        venv_dir: Path to the venv. Defaults to VENV_DIR.
+        venv_dir: Optional venv directory path. Defaults to VENV_DIR.
 
     Returns:
-        The absolute path to the Python executable in the venv.
+        The absolute path to the venv Python executable.
     """
     if venv_dir is None:
         venv_dir = VENV_DIR
-    if sys.platform == "win32":
-        return os.path.join(venv_dir, "Scripts", "python.exe")
-    return os.path.join(venv_dir, "bin", "python3")
+    if platform.system() == "Windows":
+        primary = os.path.join(venv_dir, "Scripts", "python.exe")
+        if os.path.isfile(primary):
+            return primary
+        fallback = os.path.join(venv_dir, "Scripts", "python3.exe")
+        if os.path.isfile(fallback):
+            return fallback
+        return primary  # Return expected path even if missing
+    path = os.path.join(venv_dir, "bin", "python3")
+    if os.path.isfile(path):
+        return path
+    return os.path.join(venv_dir, "bin", "python")
 
 
-def get_venv_site_packages(venv_dir: str = None) -> str:
-    """Get the site-packages path within the venv.
+def get_venv_pip_path(venv_dir: str = None) -> str:
+    """Get the path to pip inside the venv.
 
     Args:
-        venv_dir: Path to the venv. Defaults to VENV_DIR.
+        venv_dir: Optional venv directory path. Defaults to VENV_DIR.
 
     Returns:
-        The absolute path to the site-packages directory in the venv.
+        The absolute path to the venv pip executable.
     """
     if venv_dir is None:
         venv_dir = VENV_DIR
-    if sys.platform == "win32":
-        return os.path.join(venv_dir, "Lib", "site-packages")
+    if platform.system() == "Windows":
+        return os.path.join(venv_dir, "Scripts", "pip.exe")
+    return os.path.join(venv_dir, "bin", "pip")
 
-    # On Unix, detect the actual pythonX.Y directory inside lib/
+
+def get_venv_site_packages(venv_dir: str = None) -> Optional[str]:
+    """Get the path to the site-packages directory inside the venv.
+
+    Args:
+        venv_dir: Optional venv directory path. Defaults to VENV_DIR.
+
+    Returns:
+        The path to the venv site-packages directory, or None if not found.
+    """
+    if venv_dir is None:
+        venv_dir = VENV_DIR
+
+    if platform.system() == "Windows":
+        sp = os.path.join(venv_dir, "Lib", "site-packages")
+        return sp if os.path.isdir(sp) else None
+
+    # On Unix, detect the actual Python version directory in the venv
     lib_dir = os.path.join(venv_dir, "lib")
-    if os.path.exists(lib_dir):
-        for entry in sorted(os.listdir(lib_dir)):
-            if entry.startswith("python") and os.path.isdir(
-                os.path.join(lib_dir, entry)
-            ):
-                site_packages = os.path.join(lib_dir, entry, "site-packages")
-                if os.path.exists(site_packages):
-                    return site_packages
-
-    # Fallback based on current interpreter version
-    py_version = f"python{sys.version_info.major}.{sys.version_info.minor}"
-    return os.path.join(venv_dir, "lib", py_version, "site-packages")
+    if not os.path.isdir(lib_dir):
+        return None
+    for entry in sorted(os.listdir(lib_dir), reverse=True):
+        if entry.startswith("python"):
+            sp = os.path.join(lib_dir, entry, "site-packages")
+            if os.path.isdir(sp):
+                return sp
+    return None
 
 
 def venv_exists(venv_dir: str = None) -> bool:
-    """Check if the venv exists by looking for the Python executable.
+    """Check if the virtual environment exists.
 
     Args:
-        venv_dir: Path to the venv. Defaults to VENV_DIR.
+        venv_dir: Optional venv directory path. Defaults to VENV_DIR.
 
     Returns:
         True if the venv Python executable exists.
     """
-    if venv_dir is None:
-        venv_dir = VENV_DIR
     return os.path.exists(get_venv_python_path(venv_dir))
 
 
 # ---------------------------------------------------------------------------
-# Status check (fast, filesystem-only)
+# System Python resolution
 # ---------------------------------------------------------------------------
 
 
-def get_venv_status() -> Tuple[bool, str]:
-    """Quick filesystem check for dependency readiness.
+def _find_python_executable() -> str:
+    """Find a working Python executable for venv creation.
+
+    On QGIS Windows, sys.executable may point to qgis-bin.exe rather than
+    a Python interpreter.  This function searches for the actual Python
+    executable using multiple strategies.
 
     Returns:
-        Tuple of (is_ready, status_message).
+        Path to a Python executable, or sys.executable as fallback.
     """
-    if not venv_exists():
-        return False, "Dependencies not installed"
+    if platform.system() != "Windows":
+        return sys.executable
 
-    site_packages = get_venv_site_packages()
-    if not os.path.exists(site_packages):
-        return False, "Virtual environment incomplete"
+    # Strategy 1: Check if sys.executable is already Python
+    exe_name = os.path.basename(sys.executable).lower()
+    if exe_name in ("python.exe", "python3.exe"):
+        return sys.executable
 
-    # Check for earthengine-api marker (the 'ee' package directory)
-    ee_dir = os.path.join(site_packages, "ee")
-    if not os.path.isdir(ee_dir):
-        return False, "earthengine-api not installed"
+    # Strategy 2: Use sys._base_prefix to find the Python installation.
+    # On QGIS Windows, sys._base_prefix typically points to
+    # C:\Program Files\QGIS 3.x\apps\Python3x\
+    base_prefix = getattr(sys, "_base_prefix", None) or sys.prefix
+    python_in_prefix = os.path.join(base_prefix, "python.exe")
+    if os.path.isfile(python_in_prefix):
+        return python_in_prefix
 
-    # Check hash-based invalidation
-    stored_hash = _read_deps_hash()
-    current_hash = _compute_deps_hash()
-    if stored_hash is not None and stored_hash != current_hash:
-        return False, "Dependencies need update"
-    if stored_hash is None:
-        return False, "Dependencies need verification"
+    # Strategy 3: Look for python.exe next to sys.executable
+    exe_dir = os.path.dirname(sys.executable)
+    for name in ("python.exe", "python3.exe"):
+        candidate = os.path.join(exe_dir, name)
+        if os.path.isfile(candidate):
+            return candidate
 
-    return True, "Dependencies ready"
+    # Strategy 4: Walk up from sys.executable to find apps/Python3x/python.exe
+    # Typical QGIS layout: .../QGIS 3.x/bin/qgis-bin.exe
+    #                       .../QGIS 3.x/apps/Python3x/python.exe
+    parent = os.path.dirname(exe_dir)
+    apps_dir = os.path.join(parent, "apps")
+    if os.path.isdir(apps_dir):
+        best_candidate = None
+        best_version_num = -1
+        for entry in os.listdir(apps_dir):
+            lower_entry = entry.lower()
+            if not lower_entry.startswith("python"):
+                continue
+            suffix = lower_entry.removeprefix("python")
+            digits = "".join(ch for ch in suffix if ch.isdigit())
+            if not digits:
+                continue
+            try:
+                version_num = int(digits)
+            except ValueError:
+                continue
+            candidate = os.path.join(apps_dir, entry, "python.exe")
+            if os.path.isfile(candidate) and version_num > best_version_num:
+                best_version_num = version_num
+                best_candidate = candidate
+        if best_candidate:
+            return best_candidate
+
+    # Strategy 5: Use shutil.which as last resort
+    which_python = shutil.which("python")
+    if which_python:
+        return which_python
+
+    # Fallback: return sys.executable (may fail, but preserves current behavior)
+    return sys.executable
+
+
+def _get_system_python() -> str:
+    """Get the path to the Python executable for creating venvs.
+
+    Uses the standalone Python downloaded by python_manager if available.
+    On Windows, falls back to QGIS's bundled Python using multi-strategy
+    detection (handles qgis-bin.exe, apps/Python3x/, etc.).
+
+    Returns:
+        The path to a usable Python executable.
+
+    Raises:
+        RuntimeError: If no usable Python is found.
+    """
+    from .python_manager import get_standalone_python_path, standalone_python_exists
+
+    if standalone_python_exists():
+        python_path = get_standalone_python_path()
+        _log(f"Using standalone Python: {python_path}")
+        return python_path
+
+    # Fallback: find QGIS's bundled Python (critical on Windows where
+    # sys.executable may be qgis-bin.exe)
+    python_path = _find_python_executable()
+    if python_path and os.path.isfile(python_path):
+        _log(
+            f"Standalone Python unavailable, using system Python: {python_path}",
+            Qgis.Warning,
+        )
+        return python_path
+
+    raise RuntimeError(
+        "Python standalone not installed. "
+        "Please click 'Install Dependencies' to download Python automatically."
+    )
 
 
 # ---------------------------------------------------------------------------
-# sys.path injection
+# Venv creation
+# ---------------------------------------------------------------------------
+
+
+def _cleanup_partial_venv(venv_dir: str):
+    """Remove a partially-created venv directory.
+
+    Args:
+        venv_dir: The venv directory to remove.
+    """
+    if os.path.exists(venv_dir):
+        try:
+            shutil.rmtree(venv_dir, ignore_errors=True)
+            _log(f"Cleaned up partial venv: {venv_dir}")
+        except Exception:
+            _log(f"Could not clean up partial venv: {venv_dir}", Qgis.Warning)
+
+
+def create_venv(
+    venv_dir: str = None,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
+) -> Tuple[bool, str]:
+    """Create a virtual environment using uv (preferred) or stdlib venv.
+
+    When uv is available, uses ``uv venv`` which is faster and does not
+    require pip to be bootstrapped inside the venv.  Falls back to
+    ``python -m venv`` + ``ensurepip`` when uv is not available.
+
+    Args:
+        venv_dir: Optional venv directory path. Defaults to VENV_DIR.
+        progress_callback: Function called with (percent, message).
+
+    Returns:
+        A tuple of (success, message).
+    """
+    if venv_dir is None:
+        venv_dir = VENV_DIR
+
+    _log(f"Creating virtual environment at: {venv_dir}")
+
+    if progress_callback:
+        progress_callback(10, "Creating virtual environment...")
+
+    system_python = _get_system_python()
+    _log(f"Using Python: {system_python}")
+
+    from .uv_manager import get_uv_path, uv_exists
+
+    use_uv = uv_exists()
+
+    if use_uv:
+        uv_path = get_uv_path()
+        cmd = [uv_path, "venv", "--python", system_python, venv_dir]
+        _log("Creating venv with uv")
+    else:
+        cmd = [system_python, "-m", "venv", venv_dir]
+        _log("Creating venv with stdlib venv")
+
+    try:
+        env = _get_clean_env_for_venv()
+        kwargs = _get_subprocess_kwargs()
+
+        result = subprocess.run(  # nosec B603
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=env,
+            **kwargs,
+        )
+
+        if result.returncode == 0:
+            _log("Virtual environment created successfully")
+
+            # When using stdlib venv, ensure pip is available
+            if not use_uv:
+                pip_path = get_venv_pip_path(venv_dir)
+                if not os.path.exists(pip_path):
+                    _log("pip not found in venv, bootstrapping with ensurepip...")
+                    python_in_venv = get_venv_python_path(venv_dir)
+                    ensurepip_cmd = [
+                        python_in_venv,
+                        "-m",
+                        "ensurepip",
+                        "--upgrade",
+                    ]
+                    try:
+                        ensurepip_result = subprocess.run(  # nosec B603
+                            ensurepip_cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=120,
+                            env=env,
+                            **kwargs,
+                        )
+                        if ensurepip_result.returncode == 0:
+                            _log("pip bootstrapped via ensurepip")
+                        else:
+                            err = ensurepip_result.stderr or ensurepip_result.stdout
+                            _log(f"ensurepip failed: {err[:200]}", Qgis.Warning)
+                            _cleanup_partial_venv(venv_dir)
+                            return False, f"Failed to bootstrap pip: {err[:200]}"
+                    except Exception as e:
+                        _log(f"ensurepip exception: {e}", Qgis.Warning)
+                        _cleanup_partial_venv(venv_dir)
+                        return False, f"Failed to bootstrap pip: {str(e)[:200]}"
+
+            if progress_callback:
+                progress_callback(20, "Virtual environment created")
+            return True, "Virtual environment created"
+        else:
+            error_msg = (
+                result.stderr or result.stdout or f"Return code {result.returncode}"
+            )
+            _log(f"Failed to create venv: {error_msg}", Qgis.Critical)
+            _cleanup_partial_venv(venv_dir)
+            return False, f"Failed to create venv: {error_msg[:200]}"
+
+    except subprocess.TimeoutExpired:
+        _log("Virtual environment creation timed out", Qgis.Critical)
+        _cleanup_partial_venv(venv_dir)
+        return False, "Virtual environment creation timed out"
+    except FileNotFoundError:
+        _log(f"Python executable not found: {system_python}", Qgis.Critical)
+        return False, f"Python not found: {system_python}"
+    except Exception as e:
+        _log(f"Exception during venv creation: {str(e)}", Qgis.Critical)
+        _cleanup_partial_venv(venv_dir)
+        return False, f"Error: {str(e)[:200]}"
+
+
+# ---------------------------------------------------------------------------
+# Package installation
+# ---------------------------------------------------------------------------
+
+
+def _is_ssl_error(stderr: str) -> bool:
+    """Check if a pip error is SSL-related.
+
+    Args:
+        stderr: The stderr output from pip.
+
+    Returns:
+        True if the error is SSL-related.
+    """
+    ssl_markers = ["ssl", "certificate", "CERTIFICATE_VERIFY_FAILED"]
+    lower = stderr.lower()
+    return any(m.lower() in lower for m in ssl_markers)
+
+
+def _is_network_error(stderr: str) -> bool:
+    """Check if a pip error is network-related.
+
+    Args:
+        stderr: The stderr output from pip.
+
+    Returns:
+        True if the error is network-related.
+    """
+    network_markers = [
+        "ConnectionError",
+        "connection refused",
+        "connection reset",
+        "timed out",
+        "RemoteDisconnected",
+        "NewConnectionError",
+    ]
+    return any(m.lower() in stderr.lower() for m in network_markers)
+
+
+def _classify_pip_error(stderr: str) -> str:
+    """Classify a pip/uv error into a user-friendly message.
+
+    Args:
+        stderr: The stderr output from pip/uv.
+
+    Returns:
+        A user-friendly error message string.
+    """
+    stderr_lower = stderr.lower()
+
+    if "no matching distribution" in stderr_lower:
+        return (
+            "A required package was not found. "
+            "Check your internet connection and try again."
+        )
+    if "permission" in stderr_lower or "denied" in stderr_lower:
+        return (
+            "Permission denied installing dependencies. "
+            "Try running QGIS as administrator."
+        )
+    if "no space left" in stderr_lower:
+        return "Not enough disk space to install dependencies."
+
+    return f"Failed to install dependencies: {stderr[:300]}"
+
+
+def _run_install_subprocess(
+    cmd: list,
+    env: dict,
+    kwargs: dict,
+    timeout: int,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> Tuple[int, str, str]:
+    """Run an install command with progress polling and cancellation support.
+
+    Uses Popen to allow periodic progress updates and cancellation checks
+    while the subprocess is running.
+
+    Args:
+        cmd: The command list to execute.
+        env: Environment dict for the subprocess.
+        kwargs: Additional subprocess kwargs.
+        timeout: Timeout in seconds.
+        progress_callback: Optional callback for progress updates (percent, msg).
+        cancel_check: Optional function that returns True to cancel.
+
+    Returns:
+        A tuple of (returncode, stdout, stderr).
+            returncode is -1 if cancelled, -2 if timed out.
+    """
+    proc = subprocess.Popen(  # nosec B603
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        **kwargs,
+    )
+    start = time.time()
+    poll_interval = 2  # seconds
+    # Progress ticks from 25% to 85% over the timeout period
+    while True:
+        try:
+            proc.wait(timeout=poll_interval)
+            # Process finished
+            break
+        except subprocess.TimeoutExpired:
+            pass
+
+        # Check cancellation
+        if cancel_check and cancel_check():
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            return -1, "", "Installation cancelled by user."
+
+        # Check overall timeout
+        elapsed = time.time() - start
+        if elapsed >= timeout:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            return -2, "", f"Timed out after {timeout // 60} minutes."
+
+        # Emit intermediate progress (25-85% range based on elapsed time)
+        if progress_callback:
+            fraction = min(elapsed / timeout, 1.0)
+            percent = int(25 + fraction * 60)
+            progress_callback(percent, "Installing packages...")
+
+    stdout = proc.stdout.read() if proc.stdout else ""
+    stderr = proc.stderr.read() if proc.stderr else ""
+    return proc.returncode, stdout, stderr
+
+
+def _run_install(
+    cmd: list,
+    env: dict,
+    kwargs: dict,
+    timeout: int = 600,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+    installer: str = "pip",
+) -> Tuple[bool, str]:
+    """Run a pip/uv install command with retry logic.
+
+    Args:
+        cmd: The command list to execute.
+        env: Environment dict for the subprocess.
+        kwargs: Additional subprocess kwargs.
+        timeout: Timeout in seconds.
+        progress_callback: Optional callback for progress updates (percent, msg).
+        cancel_check: Optional function that returns True to cancel.
+        installer: "pip" or "uv", used for retry flags and logging.
+
+    Returns:
+        A tuple of (success, error_message).
+    """
+    try:
+        returncode, stdout, stderr = _run_install_subprocess(
+            cmd, env, kwargs, timeout, progress_callback, cancel_check
+        )
+
+        if returncode == -1:
+            return False, "Installation cancelled."
+        if returncode == -2:
+            return False, f"Installation timed out after {timeout // 60} minutes."
+        if returncode == 0:
+            return True, ""
+
+        stderr = stderr or stdout or ""
+
+        # Retry on SSL errors
+        if _is_ssl_error(stderr):
+            if installer == "uv":
+                ssl_flags = [
+                    "--allow-insecure-host",
+                    "pypi.org",
+                    "--allow-insecure-host",
+                    "files.pythonhosted.org",
+                ]
+            else:
+                ssl_flags = [
+                    "--trusted-host",
+                    "pypi.org",
+                    "--trusted-host",
+                    "files.pythonhosted.org",
+                ]
+            _log(
+                f"SSL error installing dependencies via {installer}, "
+                f"retrying with trusted hosts",
+                Qgis.Warning,
+            )
+            retry_cmd = cmd + ssl_flags
+            returncode, stdout, retry_stderr = _run_install_subprocess(
+                retry_cmd, env, kwargs, timeout, progress_callback, cancel_check
+            )
+            if returncode == -1:
+                return False, "Installation cancelled."
+            if returncode == 0:
+                return True, ""
+            stderr = retry_stderr or stderr
+
+        # Retry on network errors with a delay
+        if _is_network_error(stderr):
+            _log(
+                f"Network error installing dependencies via {installer}, "
+                f"retrying in 5s...",
+                Qgis.Warning,
+            )
+            time.sleep(5)
+            returncode, stdout, retry_stderr = _run_install_subprocess(
+                cmd, env, kwargs, timeout, progress_callback, cancel_check
+            )
+            if returncode == -1:
+                return False, "Installation cancelled."
+            if returncode == 0:
+                return True, ""
+            stderr = retry_stderr or stderr
+
+        # Classify the error for a user-friendly message
+        return False, _classify_pip_error(stderr)
+
+    except FileNotFoundError:
+        if installer == "uv":
+            return False, "uv executable not found."
+        return False, "Python executable not found in virtual environment."
+    except Exception as e:
+        return False, f"Unexpected error installing dependencies: {str(e)}"
+
+
+def install_dependencies(
+    venv_dir: str = None,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> Tuple[bool, str]:
+    """Install required packages into the virtual environment.
+
+    Uses uv when available for significantly faster installation,
+    falling back to pip otherwise.
+
+    Args:
+        venv_dir: Optional venv directory path. Defaults to VENV_DIR.
+        progress_callback: Function called with (percent, message).
+        cancel_check: Function that returns True if operation should be cancelled.
+
+    Returns:
+        A tuple of (success, message).
+    """
+    if venv_dir is None:
+        venv_dir = VENV_DIR
+
+    python_path = get_venv_python_path(venv_dir)
+    if not os.path.exists(python_path):
+        return False, "Virtual environment Python not found"
+
+    env = _get_clean_env_for_venv()
+    kwargs = _get_subprocess_kwargs()
+
+    from .uv_manager import get_uv_path, uv_exists
+
+    use_uv = uv_exists()
+    if use_uv:
+        uv_path = get_uv_path()
+        _log("Installing dependencies with uv")
+    else:
+        _log("Installing dependencies with pip")
+
+    # Build the full list of package specs for batch installation
+    pkg_specs = []
+    pkg_names = []
+    for package_name, version_spec in REQUIRED_PACKAGES:
+        pkg_spec = f"{package_name}{version_spec}" if version_spec else package_name
+        pkg_specs.append(pkg_spec)
+        pkg_names.append(package_name)
+
+    if cancel_check and cancel_check():
+        return False, "Installation cancelled."
+
+    # Scale timeout with number of packages (600s per package)
+    total = len(REQUIRED_PACKAGES)
+    timeout = 600 * total
+
+    if progress_callback:
+        progress_callback(20, f"Installing {', '.join(pkg_names)}...")
+
+    if use_uv:
+        cmd = [
+            uv_path,
+            "pip",
+            "install",
+            "--python",
+            python_path,
+            "--upgrade",
+        ] + pkg_specs
+        success, error_msg = _run_install(
+            cmd,
+            env,
+            kwargs,
+            timeout=timeout,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
+            installer="uv",
+        )
+    else:
+        cmd = [
+            python_path,
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
+            "--prefer-binary",
+            "--disable-pip-version-check",
+            "--no-warn-script-location",
+        ] + pkg_specs
+        success, error_msg = _run_install(
+            cmd,
+            env,
+            kwargs,
+            timeout=timeout,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
+            installer="pip",
+        )
+
+    if not success:
+        return False, error_msg
+
+    _log(f"Installed {total} package(s)")
+
+    if progress_callback:
+        progress_callback(90, "All packages installed")
+
+    return True, f"Successfully installed {total} package(s)"
+
+
+# ---------------------------------------------------------------------------
+# Verification
+# ---------------------------------------------------------------------------
+
+
+def _get_verification_code(package_name: str) -> str:
+    """Get functional test code for a package.
+
+    Args:
+        package_name: The package to generate test code for.
+
+    Returns:
+        A Python code string that tests the package.
+    """
+    if package_name == "earthengine-api":
+        return "import ee; print(ee.__version__)"
+    import_name = package_name.replace("-", "_")
+    return f"import {import_name}"
+
+
+def verify_venv(
+    venv_dir: str = None,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
+) -> Tuple[bool, str]:
+    """Verify that all required packages work in the venv.
+
+    Runs functional test code for each package in a subprocess to
+    verify the venv is properly set up.
+
+    Args:
+        venv_dir: Optional venv directory path. Defaults to VENV_DIR.
+        progress_callback: Function called with (percent, message).
+
+    Returns:
+        A tuple of (success, message).
+    """
+    if venv_dir is None:
+        venv_dir = VENV_DIR
+
+    if not venv_exists(venv_dir):
+        return False, "Virtual environment not found"
+
+    python_path = get_venv_python_path(venv_dir)
+    env = _get_clean_env_for_venv()
+    kwargs = _get_subprocess_kwargs()
+
+    total = len(REQUIRED_PACKAGES)
+    for i, (package_name, _) in enumerate(REQUIRED_PACKAGES):
+        if progress_callback:
+            percent = int((i / total) * 100)
+            progress_callback(percent, f"Verifying {package_name}... ({i + 1}/{total})")
+
+        verify_code = _get_verification_code(package_name)
+        cmd = [python_path, "-c", verify_code]
+
+        try:
+            result = subprocess.run(  # nosec B603
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env=env,
+                **kwargs,
+            )
+
+            if result.returncode != 0:
+                error_detail = (
+                    result.stderr[:300] if result.stderr else result.stdout[:300]
+                )
+                _log(
+                    f"Package {package_name} verification failed: {error_detail}",
+                    Qgis.Warning,
+                )
+                return False, (
+                    f"Package {package_name} is broken: {error_detail[:200]}"
+                )
+
+        except subprocess.TimeoutExpired:
+            _log(f"Verification of {package_name} timed out", Qgis.Warning)
+            return False, f"Verification of {package_name} timed out"
+        except Exception as e:
+            _log(f"Failed to verify {package_name}: {str(e)}", Qgis.Warning)
+            return False, f"Verification error: {package_name}"
+
+    if progress_callback:
+        progress_callback(100, "Verification complete")
+
+    _log("Virtual environment verified successfully")
+    return True, "Virtual environment ready"
+
+
+# ---------------------------------------------------------------------------
+# Runtime integration
 # ---------------------------------------------------------------------------
 
 
 def ensure_venv_packages_available() -> bool:
-    """Add venv site-packages to sys.path so dependencies can be imported.
+    """Make venv packages importable by adding site-packages to sys.path.
 
     Also patches the 'ee' module into any already-loaded modules that had
     set ee = None due to ImportError before the venv was available.
 
     Returns:
-        True if site-packages were successfully added, False otherwise.
+        True if venv packages are available, False otherwise.
     """
     if not venv_exists():
         _log("Venv does not exist, cannot load packages", Qgis.Warning)
         return False
 
     site_packages = get_venv_site_packages()
-    if not os.path.exists(site_packages):
-        _log(f"Venv site-packages not found: {site_packages}", Qgis.Warning)
+    if site_packages is None:
+        _log(f"Venv site-packages not found in: {VENV_DIR}", Qgis.Warning)
         return False
 
     if site_packages not in sys.path:
@@ -242,313 +906,67 @@ def _patch_ee_module():
 
 
 # ---------------------------------------------------------------------------
-# Subprocess helpers
+# Status checking
 # ---------------------------------------------------------------------------
 
 
-def _get_clean_env_for_venv() -> dict:
-    """Get a clean environment for venv subprocess operations.
+def get_venv_status() -> Tuple[bool, str]:
+    """Get the status of the virtual environment installation.
 
     Returns:
-        A copy of os.environ with QGIS-specific variables removed.
+        A tuple of (is_ready, status_message).
     """
-    env = os.environ.copy()
-    vars_to_remove = [
-        "PYTHONPATH",
-        "PYTHONHOME",
-        "VIRTUAL_ENV",
-        "QGIS_PREFIX_PATH",
-        "QGIS_PLUGINPATH",
-    ]
-    for var in vars_to_remove:
-        env.pop(var, None)
-    env["PYTHONIOENCODING"] = "utf-8"
-    return env
+    from .python_manager import standalone_python_exists
+
+    if not standalone_python_exists():
+        return False, "Dependencies not installed"
+
+    if not venv_exists():
+        return False, "Virtual environment not configured"
+
+    # Quick filesystem check for packages
+    site_packages = get_venv_site_packages()
+    if site_packages is None:
+        return False, "Virtual environment incomplete"
+
+    # Check for earthengine-api marker (the 'ee' package directory)
+    ee_dir = os.path.join(site_packages, "ee")
+    if not os.path.isdir(ee_dir):
+        return False, "earthengine-api not installed"
+
+    return True, "Dependencies ready"
 
 
-def _get_subprocess_kwargs() -> dict:
-    """Get platform-specific subprocess kwargs (hide console on Windows).
+def check_dependencies() -> Tuple[bool, list, list]:
+    """Check if all required packages are installed and importable.
+
+    Attempts to use importlib.metadata after ensuring venv packages
+    are on sys.path. This is a lightweight check suitable for UI display.
 
     Returns:
-        A dict of kwargs to pass to subprocess.run.
+        A tuple of (all_ok, missing, installed) where:
+            all_ok: True if all required packages are installed.
+            missing: List of (package_name, version_spec) for missing packages.
+            installed: List of (package_name, version_string) for installed packages.
     """
-    kwargs = {}
-    if sys.platform == "win32":
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startupinfo.wShowWindow = subprocess.SW_HIDE
-        kwargs["startupinfo"] = startupinfo
-        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-    return kwargs
+    ensure_venv_packages_available()
 
+    missing = []
+    installed = []
 
-def _get_python_for_venv() -> str:
-    """Get a Python executable suitable for creating venvs.
-
-    Handles the macOS edge case where sys.executable may point to
-    the QGIS binary instead of Python.
-
-    Returns:
-        Path to a working Python executable.
-    """
-    subprocess_kwargs = _get_subprocess_kwargs()
-    candidates = [sys.executable]
-
-    if sys.platform != "win32":
-        candidates.append(os.path.join(sys.prefix, "bin", "python3"))
-        candidates.append(os.path.join(sys.prefix, "bin", "python"))
-    else:
-        candidates.append(os.path.join(sys.prefix, "python.exe"))
-        candidates.append(os.path.join(sys.prefix, "python3.exe"))
-
-    for candidate in candidates:
-        if not os.path.exists(candidate):
-            continue
+    for package_name, version_spec in REQUIRED_PACKAGES:
         try:
-            result = subprocess.run(  # nosec B603
-                [candidate, "-c", "import venv; print('ok')"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                **subprocess_kwargs,
-            )
-            if result.returncode == 0 and "ok" in result.stdout:
-                return candidate
-        except (subprocess.TimeoutExpired, OSError, ValueError) as exc:
-            _log(f"Python candidate {candidate} failed: {exc}", Qgis.Warning)
+            version = importlib.metadata.version(package_name)
+            installed.append((package_name, version))
+        except importlib.metadata.PackageNotFoundError:
+            missing.append((package_name, version_spec))
 
-    # Last resort
-    return sys.executable
+    all_ok = len(missing) == 0
+    return all_ok, missing, installed
 
 
 # ---------------------------------------------------------------------------
-# Venv creation
-# ---------------------------------------------------------------------------
-
-
-def _cleanup_partial_venv(venv_dir: str):
-    """Remove a partially-created venv to prevent broken state on retry.
-
-    Args:
-        venv_dir: Path to the venv directory to clean up.
-    """
-    if os.path.exists(venv_dir):
-        try:
-            shutil.rmtree(venv_dir, ignore_errors=True)
-            _log(f"Cleaned up partial venv: {venv_dir}")
-        except Exception:
-            _log(f"Could not clean up partial venv: {venv_dir}", Qgis.Warning)
-
-
-def create_venv(
-    venv_dir: str = None,
-    progress_callback: Optional[Callable[[int, str], None]] = None,
-) -> Tuple[bool, str]:
-    """Create a Python virtual environment at the specified directory.
-
-    Args:
-        venv_dir: Path for the venv. Defaults to VENV_DIR.
-        progress_callback: Callback for progress updates (percent, message).
-
-    Returns:
-        Tuple of (success, message).
-    """
-    if venv_dir is None:
-        venv_dir = VENV_DIR
-
-    _log(f"Creating virtual environment at: {venv_dir}")
-
-    if progress_callback:
-        progress_callback(5, "Creating virtual environment...")
-
-    system_python = _get_python_for_venv()
-    _log(f"Using Python: {system_python}")
-
-    os.makedirs(os.path.dirname(venv_dir), exist_ok=True)
-    cmd = [system_python, "-m", "venv", venv_dir]
-
-    try:
-        env = _get_clean_env_for_venv()
-        subprocess_kwargs = _get_subprocess_kwargs()
-
-        result = subprocess.run(  # nosec B603
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env=env,
-            **subprocess_kwargs,
-        )
-
-        if result.returncode != 0:
-            error_msg = (
-                result.stderr or result.stdout or f"Return code {result.returncode}"
-            )
-            _log(f"Failed to create venv: {error_msg}", Qgis.Critical)
-            _cleanup_partial_venv(venv_dir)
-            return False, f"Failed to create virtual environment: {error_msg[:300]}"
-
-        _log("Virtual environment created successfully")
-
-        # Ensure pip is available (bootstrap if needed)
-        python_in_venv = get_venv_python_path(venv_dir)
-        pip_check_cmd = [python_in_venv, "-m", "pip", "--version"]
-        pip_result = subprocess.run(  # nosec B603
-            pip_check_cmd,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=env,
-            **subprocess_kwargs,
-        )
-
-        if pip_result.returncode != 0:
-            _log("pip not found in venv, bootstrapping with ensurepip...")
-            ensurepip_cmd = [python_in_venv, "-m", "ensurepip", "--upgrade"]
-            ensurepip_result = subprocess.run(  # nosec B603
-                ensurepip_cmd,
-                capture_output=True,
-                text=True,
-                timeout=120,
-                env=env,
-                **subprocess_kwargs,
-            )
-            if ensurepip_result.returncode != 0:
-                err = ensurepip_result.stderr or ensurepip_result.stdout
-                _log(f"ensurepip failed: {err[:200]}", Qgis.Warning)
-                _cleanup_partial_venv(venv_dir)
-                return False, f"Failed to bootstrap pip: {err[:200]}"
-
-        if progress_callback:
-            progress_callback(15, "Virtual environment created")
-        return True, "Virtual environment created"
-
-    except subprocess.TimeoutExpired:
-        _cleanup_partial_venv(venv_dir)
-        return False, "Virtual environment creation timed out"
-    except FileNotFoundError:
-        return False, f"Python not found: {system_python}"
-    except Exception as e:
-        _cleanup_partial_venv(venv_dir)
-        return False, f"Error creating virtual environment: {str(e)[:300]}"
-
-
-# ---------------------------------------------------------------------------
-# Dependency installation
-# ---------------------------------------------------------------------------
-
-
-def install_dependencies(
-    venv_dir: str = None,
-    progress_callback: Optional[Callable[[int, str], None]] = None,
-    cancel_check: Optional[Callable[[], bool]] = None,
-) -> Tuple[bool, str]:
-    """Install required packages into the venv using pip.
-
-    Args:
-        venv_dir: Path to the venv. Defaults to VENV_DIR.
-        progress_callback: Callback for progress updates (percent, message).
-        cancel_check: Callback that returns True if user cancelled.
-
-    Returns:
-        Tuple of (success, message).
-    """
-    if venv_dir is None:
-        venv_dir = VENV_DIR
-
-    if not venv_exists(venv_dir):
-        return False, "Virtual environment does not exist"
-
-    python_path = get_venv_python_path(venv_dir)
-    env = _get_clean_env_for_venv()
-    subprocess_kwargs = _get_subprocess_kwargs()
-
-    total = len(REQUIRED_PACKAGES)
-    base_progress = 20
-    progress_range = 70  # 20% to 90%
-
-    for i, (package_name, version_spec) in enumerate(REQUIRED_PACKAGES):
-        if cancel_check and cancel_check():
-            return False, "Installation cancelled"
-
-        package_spec = f"{package_name}{version_spec}"
-        pkg_progress = base_progress + int(progress_range * i / max(total, 1))
-
-        if progress_callback:
-            progress_callback(pkg_progress, f"Installing {package_name}...")
-
-        cmd = [
-            python_path,
-            "-m",
-            "pip",
-            "install",
-            "--no-warn-script-location",
-            "--disable-pip-version-check",
-            package_spec,
-        ]
-
-        _log(f"Running: {' '.join(cmd)}")
-
-        try:
-            result = subprocess.run(  # nosec B603
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=600,  # 10 min per package
-                env=env,
-                **subprocess_kwargs,
-            )
-
-            if result.returncode != 0:
-                error_output = result.stderr or result.stdout or "Unknown error"
-                _log(
-                    f"Failed to install {package_name}: {error_output}",
-                    Qgis.Critical,
-                )
-                return (
-                    False,
-                    f"Failed to install {package_name}:\n{error_output[:500]}",
-                )
-
-            _log(f"Successfully installed {package_name}")
-
-        except subprocess.TimeoutExpired:
-            return False, f"Installation of {package_name} timed out"
-        except Exception as e:
-            return False, f"Error installing {package_name}: {str(e)[:300]}"
-
-    # Verify installation
-    if progress_callback:
-        progress_callback(92, "Verifying installation...")
-
-    verify_cmd = [python_path, "-c", "import ee; print(ee.__version__)"]
-    try:
-        result = subprocess.run(  # nosec B603
-            verify_cmd,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=env,
-            **subprocess_kwargs,
-        )
-        if result.returncode != 0:
-            error = result.stderr or result.stdout
-            return False, f"Verification failed: {error[:300]}"
-        _log(f"Verified ee version: {result.stdout.strip()}")
-    except Exception as e:
-        return False, f"Verification error: {str(e)[:200]}"
-
-    # Write deps hash on success
-    _write_deps_hash()
-
-    if progress_callback:
-        progress_callback(100, "Installation complete!")
-
-    return True, "Dependencies installed successfully"
-
-
-# ---------------------------------------------------------------------------
-# Main orchestrator
+# Orchestration
 # ---------------------------------------------------------------------------
 
 
@@ -556,72 +974,180 @@ def create_venv_and_install(
     progress_callback: Optional[Callable[[int, str], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
 ) -> Tuple[bool, str]:
-    """Complete installation: create venv + install packages.
+    """Complete installation: download Python + download uv + create venv + install.
 
     Progress breakdown:
-    - 0-15%: Create virtual environment
-    - 15-95%: Install packages
-    - 95-100%: Verify installation
+        0-35%: Download Python standalone
+        35-40%: Download uv package installer
+        40-50%: Create virtual environment
+        50-90%: Install packages
+        90-100%: Verify installation
 
     Args:
-        progress_callback: Callback for progress updates (percent, message).
-        cancel_check: Callback that returns True if user cancelled.
+        progress_callback: Function called with (percent, message).
+        cancel_check: Function that returns True if operation should be cancelled.
 
     Returns:
-        Tuple of (success, message).
+        A tuple of (success, message).
     """
+    from .python_manager import (
+        download_python_standalone,
+        standalone_python_exists,
+    )
+    from .uv_manager import download_uv, uv_exists
+
+    start_time = time.time()
+
     _log("Starting dependency installation...")
     _log(f"Platform: {platform.system()} {platform.machine()}")
     _log(f"Python: {sys.version}")
     _log(f"Venv dir: {VENV_DIR}")
 
-    # Clean up old venv directories from previous Python versions
+    # Clean up old venv directories from previous layout
     cleanup_old_venv_directories()
 
-    if cancel_check and cancel_check():
-        return False, "Installation cancelled"
+    # Step 1: Download Python standalone if needed (0-35%)
+    if not standalone_python_exists():
+        _log("Downloading Python standalone...")
 
-    # Step 1: Create venv if needed
-    if not venv_exists():
+        def python_progress(percent, msg):
+            if progress_callback:
+                progress_callback(int(percent * 0.35), msg)
+
+        success, msg = download_python_standalone(
+            progress_callback=python_progress,
+            cancel_check=cancel_check,
+        )
+
+        if not success:
+            # Fallback: use QGIS's bundled Python (critical on Windows
+            # where sys.executable may be qgis-bin.exe)
+            fallback = _find_python_executable()
+            if fallback and os.path.isfile(fallback):
+                _log(
+                    f"Standalone download failed, using system Python: {fallback}",
+                    Qgis.Warning,
+                )
+            else:
+                return False, f"Failed to download Python: {msg}"
+
+        if cancel_check and cancel_check():
+            return False, "Installation cancelled"
+    else:
+        _log("Python standalone already installed")
         if progress_callback:
-            progress_callback(2, "Creating virtual environment...")
+            progress_callback(35, "Python standalone ready")
 
-        success, msg = create_venv(progress_callback=progress_callback)
+    # Step 1b: Download uv package installer if needed (35-40%)
+    if not uv_exists():
+        _log("Downloading uv package installer...")
+
+        def uv_progress(percent, msg):
+            if progress_callback:
+                progress_callback(35 + int(percent * 0.05), msg)
+
+        success, msg = download_uv(
+            progress_callback=uv_progress,
+            cancel_check=cancel_check,
+        )
+
+        if not success:
+            # Non-fatal: fall back to pip for venv creation and installation
+            _log(
+                f"uv download failed ({msg}), will use pip instead",
+                Qgis.Warning,
+            )
+        else:
+            _log("uv package installer ready")
+
+        if cancel_check and cancel_check():
+            return False, "Installation cancelled"
+    else:
+        _log("uv already installed")
+        if progress_callback:
+            progress_callback(40, "uv ready")
+
+    # Step 2: Create venv if needed (40-50%)
+    if venv_exists():
+        _log("Virtual environment already exists")
+        if progress_callback:
+            progress_callback(50, "Virtual environment ready")
+    else:
+
+        def venv_progress(percent, msg):
+            if progress_callback:
+                progress_callback(40 + int(percent * 0.10), msg)
+
+        success, msg = create_venv(progress_callback=venv_progress)
         if not success:
             return False, msg
-    else:
-        _log("Venv already exists, skipping creation")
+
+        if cancel_check and cancel_check():
+            return False, "Installation cancelled"
+
+    # Step 3: Install dependencies (50-90%)
+    def deps_progress(percent, msg):
         if progress_callback:
-            progress_callback(15, "Virtual environment exists")
+            # Map 20-90 range from install_dependencies to 50-90
+            mapped = 50 + int((percent - 20) * (40.0 / 70.0))
+            progress_callback(min(mapped, 90), msg)
 
-    if cancel_check and cancel_check():
-        return False, "Installation cancelled"
-
-    # Step 2: Install dependencies
     success, msg = install_dependencies(
-        progress_callback=progress_callback,
+        progress_callback=deps_progress,
         cancel_check=cancel_check,
     )
 
-    return success, msg
+    if not success:
+        return False, msg
+
+    # Step 4: Verify installation (90-100%)
+    def verify_progress(percent, msg):
+        if progress_callback:
+            mapped = 90 + int(percent * 0.10)
+            progress_callback(min(mapped, 99), msg)
+
+    is_valid, verify_msg = verify_venv(progress_callback=verify_progress)
+
+    if not is_valid:
+        return False, f"Verification failed: {verify_msg}"
+
+    elapsed = time.time() - start_time
+    if elapsed >= 60:
+        minutes, seconds = divmod(int(elapsed), 60)
+        elapsed_str = f"{minutes}:{seconds:02d}"
+    else:
+        elapsed_str = f"{elapsed:.1f}s"
+
+    if progress_callback:
+        progress_callback(100, f"All dependencies installed in {elapsed_str}")
+
+    _log(f"All dependencies installed and verified in {elapsed_str}")
+    return True, f"All dependencies installed successfully in {elapsed_str}"
+
+
+# ---------------------------------------------------------------------------
+# Cleanup
+# ---------------------------------------------------------------------------
 
 
 def cleanup_old_venv_directories() -> List[str]:
-    """Remove old venv_pyX.Y directories that don't match current Python version.
+    """Remove old versioned venv directories (venv_py3.x) from previous layout.
+
+    The plugin now uses a single ``venv/`` directory.  This helper removes
+    leftover ``venv_py*`` directories created by earlier versions.
 
     Returns:
-        List of removed directory paths.
+        A list of removed directory paths.
     """
-    current_venv_name = f"venv_{PYTHON_VERSION}"
     removed = []
 
-    if not os.path.exists(VENV_BASE_DIR):
+    if not os.path.exists(CACHE_DIR):
         return removed
 
     try:
-        for entry in os.listdir(VENV_BASE_DIR):
-            if entry.startswith("venv_py") and entry != current_venv_name:
-                old_path = os.path.join(VENV_BASE_DIR, entry)
+        for entry in os.listdir(CACHE_DIR):
+            if entry.lower().startswith("venv_py"):
+                old_path = os.path.join(CACHE_DIR, entry)
                 if os.path.isdir(old_path):
                     try:
                         shutil.rmtree(old_path)
