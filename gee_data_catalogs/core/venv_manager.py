@@ -24,6 +24,7 @@ VENV_DIR = os.path.join(CACHE_DIR, "venv")
 
 REQUIRED_PACKAGES = [
     ("earthengine-api", ">=1.4.0"),
+    ("geemap", ""),
 ]
 
 

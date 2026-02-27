@@ -61,8 +61,9 @@ class DependencyDockWidget(QDockWidget):
 
         # Info label
         info = QLabel(
-            "This plugin requires the <b>earthengine-api</b> Python package.<br><br>"
-            "Click 'Install Dependencies' to install it in an<br>"
+            "This plugin requires the <b>earthengine-api</b> and "
+            "<b>geemap</b> Python packages.<br><br>"
+            "Click 'Install Dependencies' to install them in an<br>"
             "isolated virtual environment at:<br>"
             "<code>~/.qgis_gee_data_catalogs/</code><br><br>"
             "Your QGIS Python environment will not be modified."

@@ -5941,9 +5941,13 @@ for f in data['features']:
                     ee_object = ee.FeatureCollection(asset_id)
                     ee_object.size().getInfo()  # Verify it works
                     actual_type = "FeatureCollection"
-            except Exception:
-                # Catalog type was wrong, auto-detect
-                pass
+            except Exception as type_err:
+                # Catalog type was wrong or API call failed, auto-detect
+                QgsMessageLog.logMessage(
+                    f"Loading as {catalog_type} failed for {asset_id}: {type_err}",
+                    "GEE Data Catalogs",
+                    Qgis.Warning,
+                )
 
             # If loading based on catalog type failed, auto-detect
             if ee_object is None:
