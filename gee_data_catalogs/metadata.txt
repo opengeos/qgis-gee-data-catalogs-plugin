@@ -37,7 +37,7 @@ deprecated=False
 
 changelog=
     0.9.0
-        - Fix Windows install launching QGIS, use uv and dockable panel 
+        - Fix Windows install launching QGIS, use uv and dockable panel
     0.8.0
         - Add one-click dependency installer
     0.7.0
