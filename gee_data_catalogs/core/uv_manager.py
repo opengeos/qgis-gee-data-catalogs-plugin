@@ -90,8 +90,7 @@ def get_uv_download_url() -> str:
     platform_str, ext = _get_uv_platform_info()
     filename = f"uv-{platform_str}{ext}"
     return (
-        f"https://github.com/astral-sh/uv/releases/download/"
-        f"{UV_VERSION}/{filename}"
+        f"https://github.com/astral-sh/uv/releases/download/" f"{UV_VERSION}/{filename}"
     )
 
 
