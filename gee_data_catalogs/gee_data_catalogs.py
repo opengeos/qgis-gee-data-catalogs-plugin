@@ -243,10 +243,10 @@ class GeeDataCatalogs:
         # Dependencies not ready -- show the deps dock and save callback
         self._pending_callback = callback
         self._open_deps_dock()
-        self.iface.messageBar().pushWarning(
-            "GEE Data Catalogs",
-            "Dependencies not installed. Please install them from the Dependencies panel.",
-        )
+        # self.iface.messageBar().pushWarning(
+        #     "GEE Data Catalogs",
+        #     "Dependencies not installed. Please install them from the Dependencies panel.",
+        # )
 
     def _open_deps_dock(self):
         """Create/show the dependency installation dock widget."""
@@ -257,6 +257,7 @@ class GeeDataCatalogs:
             self._deps_dock.setObjectName("GeeDataCatalogsDeps")
             self.iface.addDockWidget(Qt.RightDockWidgetArea, self._deps_dock)
             self._deps_dock.install_succeeded.connect(self._on_deps_installed)
+            self._deps_dock.auth_succeeded.connect(self._on_auth_completed)
 
         self._deps_dock.show()
         self._deps_dock.raise_()
@@ -274,6 +275,13 @@ class GeeDataCatalogs:
             callback = self._pending_callback
             self._pending_callback = None
             callback()
+
+    def _on_auth_completed(self):
+        """Handle successful EE authentication from the deps dock.
+
+        Triggers EE initialization now that credentials are available.
+        """
+        self._try_auto_init_ee()
 
     def _try_auto_init_ee(self):
         """Try to auto-initialize Earth Engine if EE_PROJECT_ID is set."""

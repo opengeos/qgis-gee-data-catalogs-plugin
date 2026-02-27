@@ -25,6 +25,7 @@ class DependencyDockWidget(QDockWidget):
     """Dockable panel for managing plugin dependency installation."""
 
     install_succeeded = pyqtSignal()
+    auth_succeeded = pyqtSignal()
 
     def __init__(self, iface, parent=None):
         """Initialize the dependency dock widget.
@@ -311,6 +312,7 @@ class DependencyDockWidget(QDockWidget):
                 "GEE Data Catalogs",
                 "Earth Engine authenticated successfully!",
             )
+            self.auth_succeeded.emit()
         else:
             self._auth_status_label.setText(f"Authentication failed: {message[:150]}")
             self._auth_status_label.setStyleSheet("color: red;")
