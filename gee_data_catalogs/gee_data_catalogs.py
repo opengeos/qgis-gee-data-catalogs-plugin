@@ -279,9 +279,17 @@ class GeeDataCatalogs:
     def _on_auth_completed(self):
         """Handle successful EE authentication from the deps dock.
 
-        Triggers EE initialization now that credentials are available.
+        Tries to initialize EE, and if no project ID is configured yet,
+        opens the Settings panel on the Earth Engine tab so the user can
+        enter one.
         """
+        from .core.ee_utils import is_ee_initialized
+
         self._try_auto_init_ee()
+
+        if not is_ee_initialized():
+            # Project ID not set yet — open Settings on the EE tab
+            self._ensure_dependencies(self._show_settings_ee_tab)
 
     def _try_auto_init_ee(self):
         """Try to auto-initialize Earth Engine if EE_PROJECT_ID is set."""
@@ -599,6 +607,20 @@ class GeeDataCatalogs:
                 f"Failed to create Settings panel:\n{str(e)}",
             )
             self.settings_action.setChecked(False)
+
+    def _show_settings_ee_tab(self):
+        """Open the Settings dock and switch to the Earth Engine tab."""
+        if self._settings_dock is None:
+            self._create_settings_dock()
+        else:
+            self._settings_dock.show()
+            self._settings_dock.raise_()
+        if self._settings_dock is not None:
+            self._settings_dock.show_ee_tab()
+            self.iface.messageBar().pushInfo(
+                "GEE Data Catalogs",
+                "Please enter your Google Cloud project ID and click Save Settings.",
+            )
 
     def _on_settings_visibility_changed(self, visible):
         """Handle Settings dock visibility change."""

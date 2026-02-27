@@ -69,20 +69,20 @@ class SettingsDockWidget(QDockWidget):
         layout.addWidget(header_label)
 
         # Tab widget for organized settings
-        tab_widget = QTabWidget()
-        layout.addWidget(tab_widget)
+        self.tab_widget = QTabWidget()
+        layout.addWidget(self.tab_widget)
 
         # General settings tab
         general_tab = self._create_general_tab()
-        tab_widget.addTab(general_tab, "General")
+        self.tab_widget.addTab(general_tab, "General")
 
         # Earth Engine tab
         ee_tab = self._create_ee_tab()
-        tab_widget.addTab(ee_tab, "Earth Engine")
+        self.tab_widget.addTab(ee_tab, "Earth Engine")
 
         # Display tab
         display_tab = self._create_display_tab()
-        tab_widget.addTab(display_tab, "Display")
+        self.tab_widget.addTab(display_tab, "Display")
 
         # Buttons
         button_layout = QHBoxLayout()
@@ -104,6 +104,11 @@ class SettingsDockWidget(QDockWidget):
         self.status_label = QLabel("Settings loaded")
         self.status_label.setStyleSheet("color: gray; font-size: 10px;")
         layout.addWidget(self.status_label)
+
+    def show_ee_tab(self):
+        """Switch to the Earth Engine tab and focus the project ID input."""
+        self.tab_widget.setCurrentIndex(1)
+        self.ee_project_input.setFocus()
 
     def _create_general_tab(self):
         """Create the general settings tab."""

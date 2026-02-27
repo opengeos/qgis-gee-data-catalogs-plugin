@@ -5483,7 +5483,9 @@ class CatalogDockWidget(QDockWidget):
                     continue
 
                 cat_item = QTreeWidgetItem([f"{category} ({len(datasets)})", "", ""])
-                cat_item.setFont(0, QFont("", -1, QFont.Bold))
+                bold_font = self.catalog_tree.font()
+                bold_font.setBold(True)
+                cat_item.setFont(0, bold_font)
 
                 for dataset in datasets:
                     source = dataset.get("source", "unknown")
@@ -7287,7 +7289,9 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
         # Display results in tree
         for layer_name, data in results.items():
             layer_item = QTreeWidgetItem([layer_name, ""])
-            layer_item.setFont(0, QFont("", -1, QFont.Bold))
+            bold_font = self.inspector_tree.font()
+            bold_font.setBold(True)
+            layer_item.setFont(0, bold_font)
 
             if data.get("type") == "Error":
                 error_item = QTreeWidgetItem(
