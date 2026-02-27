@@ -2,7 +2,8 @@
 Dependency Installation Dock Widget for GEE Data Catalogs Plugin.
 
 Provides a dockable panel for one-click installation of plugin dependencies
-(earthengine-api) into an isolated virtual environment.
+(earthengine-api) into an isolated virtual environment, with automatic
+Earth Engine authentication.
 """
 
 from qgis.PyQt.QtCore import Qt, pyqtSignal
@@ -35,6 +36,7 @@ class DependencyDockWidget(QDockWidget):
         super().__init__("GEE Data Catalogs - Dependencies", parent)
         self.iface = iface
         self._deps_worker = None
+        self._auth_worker = None
 
         self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         self._setup_ui()
@@ -110,6 +112,22 @@ class DependencyDockWidget(QDockWidget):
         self._cancel_btn.clicked.connect(self._cancel_install)
         layout.addWidget(self._cancel_btn)
 
+        # EE Authentication group (hidden until deps installed)
+        self._auth_group = QGroupBox("Earth Engine Authentication")
+        auth_layout = QVBoxLayout(self._auth_group)
+
+        self._auth_status_label = QLabel("")
+        self._auth_status_label.setWordWrap(True)
+        auth_layout.addWidget(self._auth_status_label)
+
+        self._auth_btn = QPushButton("Authenticate Earth Engine")
+        self._auth_btn.setMinimumWidth(160)
+        self._auth_btn.clicked.connect(self._start_auth)
+        auth_layout.addWidget(self._auth_btn)
+
+        self._auth_group.setVisible(False)
+        layout.addWidget(self._auth_group)
+
         # Buttons row
         btn_layout = QHBoxLayout()
 
@@ -144,8 +162,28 @@ class DependencyDockWidget(QDockWidget):
         self._install_btn.setEnabled(not all_ok)
         if all_ok:
             self._install_btn.setText("All Dependencies Installed")
+            self._update_auth_status()
         else:
             self._install_btn.setText(f"Install Dependencies ({len(missing)} missing)")
+            self._auth_group.setVisible(False)
+
+    def _update_auth_status(self):
+        """Update the EE authentication status display."""
+        from ..core.venv_manager import ee_credentials_exist
+
+        self._auth_group.setVisible(True)
+
+        if ee_credentials_exist():
+            self._auth_status_label.setText("Credentials found.")
+            self._auth_status_label.setStyleSheet("color: green; font-weight: bold;")
+            self._auth_btn.setText("Re-authenticate")
+        else:
+            self._auth_status_label.setText(
+                "No Earth Engine credentials found.\n"
+                "Click below to authenticate (opens browser)."
+            )
+            self._auth_status_label.setStyleSheet("color: orange;")
+            self._auth_btn.setText("Authenticate Earth Engine")
 
     def _start_install(self):
         """Start the dependency installation."""
@@ -158,6 +196,7 @@ class DependencyDockWidget(QDockWidget):
         # Update UI for installation mode
         self._install_btn.setEnabled(False)
         self._refresh_btn.setEnabled(False)
+        self._auth_group.setVisible(False)
         self._progress_bar.setVisible(True)
         self._progress_bar.setRange(0, 100)
         self._progress_bar.setValue(0)
@@ -204,12 +243,76 @@ class DependencyDockWidget(QDockWidget):
                 "GEE Data Catalogs", "Dependencies installed successfully!"
             )
             self.install_succeeded.emit()
+
+            # Check if EE credentials exist and show auth section
+            from ..core.venv_manager import ee_credentials_exist
+
+            if not ee_credentials_exist():
+                self._update_auth_status()
+                self._start_auth()
+            else:
+                self._update_auth_status()
         else:
             self._status_label.setStyleSheet("color: red;")
             self._install_btn.setEnabled(True)
 
         # Refresh status display
         self._refresh_deps_status()
+
+    def _start_auth(self):
+        """Start Earth Engine authentication in the background."""
+        from .deps_manager import EEAuthWorker
+
+        # Guard against concurrent auth
+        if self._auth_worker is not None and self._auth_worker.isRunning():
+            return
+
+        self._auth_btn.setEnabled(False)
+        self._auth_status_label.setText(
+            "Authenticating... A browser window should open.\n"
+            "Complete the sign-in and return here."
+        )
+        self._auth_status_label.setStyleSheet("color: blue;")
+        self._progress_bar.setVisible(True)
+        self._progress_bar.setRange(0, 0)  # Indeterminate
+
+        self._auth_worker = EEAuthWorker()
+        self._auth_worker.progress.connect(self._on_auth_progress)
+        self._auth_worker.finished.connect(self._on_auth_finished)
+        self._auth_worker.start()
+
+    def _on_auth_progress(self, percent: int, message: str):
+        """Handle auth progress updates.
+
+        Args:
+            percent: Progress percentage.
+            message: Status message.
+        """
+        self._auth_status_label.setText(message)
+
+    def _on_auth_finished(self, success: bool, message: str):
+        """Handle authentication completion.
+
+        Args:
+            success: Whether authentication succeeded.
+            message: Result message.
+        """
+        self._auth_worker = None
+        self._progress_bar.setVisible(False)
+        self._progress_bar.setRange(0, 100)
+        self._auth_btn.setEnabled(True)
+
+        if success:
+            self._auth_status_label.setText("Credentials found.")
+            self._auth_status_label.setStyleSheet("color: green; font-weight: bold;")
+            self._auth_btn.setText("Re-authenticate")
+            self.iface.messageBar().pushSuccess(
+                "GEE Data Catalogs",
+                "Earth Engine authenticated successfully!",
+            )
+        else:
+            self._auth_status_label.setText(f"Authentication failed: {message[:150]}")
+            self._auth_status_label.setStyleSheet("color: red;")
 
     def _cancel_install(self):
         """Cancel the ongoing dependency installation."""

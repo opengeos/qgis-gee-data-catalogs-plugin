@@ -1126,6 +1126,76 @@ def create_venv_and_install(
 
 
 # ---------------------------------------------------------------------------
+# Authentication
+# ---------------------------------------------------------------------------
+
+
+def ee_credentials_exist() -> bool:
+    """Check if Earth Engine credentials file exists.
+
+    Returns:
+        True if credentials file exists, False otherwise.
+    """
+    credentials_path = os.path.expanduser("~/.config/earthengine/credentials")
+    return os.path.exists(credentials_path)
+
+
+def authenticate_ee(
+    progress_callback: Optional[Callable[[int, str], None]] = None,
+) -> Tuple[bool, str]:
+    """Run ee.Authenticate() in the venv Python as a subprocess.
+
+    This opens a browser window for the user to complete OAuth authentication.
+    The subprocess is non-blocking — the user interacts with the browser, and
+    the process waits for them to complete.
+
+    Args:
+        progress_callback: Optional callback for status updates.
+
+    Returns:
+        A tuple of (success, message).
+    """
+    if not venv_exists():
+        return False, "Virtual environment not found"
+
+    python_path = get_venv_python_path()
+    env = _get_clean_env_for_venv()
+    kwargs = _get_subprocess_kwargs()
+
+    auth_code = "import ee; ee.Authenticate()"
+
+    if progress_callback:
+        progress_callback(50, "Waiting for browser authentication...")
+
+    _log("Running ee.Authenticate() in venv...")
+
+    try:
+        result = subprocess.run(  # nosec B603
+            [python_path, "-c", auth_code],
+            capture_output=True,
+            text=True,
+            timeout=300,  # 5 minutes for user to complete browser auth
+            env=env,
+            **kwargs,
+        )
+
+        if result.returncode == 0:
+            _log("Earth Engine authentication completed")
+            if progress_callback:
+                progress_callback(100, "Authentication complete!")
+            return True, "Earth Engine authentication completed successfully"
+        else:
+            error = result.stderr or result.stdout or "Unknown error"
+            _log(f"EE authentication failed: {error[:200]}", Qgis.Warning)
+            return False, f"Authentication failed: {error[:200]}"
+
+    except subprocess.TimeoutExpired:
+        return False, "Authentication timed out (5 minutes)"
+    except Exception as e:
+        return False, f"Authentication error: {str(e)[:200]}"
+
+
+# ---------------------------------------------------------------------------
 # Cleanup
 # ---------------------------------------------------------------------------
 

@@ -1,9 +1,9 @@
 """
 Dependency Installation Worker for GEE Data Catalogs Plugin.
 
-Provides a QThread-based worker that runs the full dependency
-installation (Python download + uv download + venv creation +
-package install) in the background to avoid freezing the QGIS UI.
+Provides QThread-based workers that run dependency installation and
+Earth Engine authentication in the background to avoid freezing the
+QGIS UI.
 """
 
 import traceback
@@ -46,6 +46,42 @@ class DepsInstallWorker(QThread):
             success, message = create_venv_and_install(
                 progress_callback=lambda percent, msg: self.progress.emit(percent, msg),
                 cancel_check=lambda: self._cancelled,
+            )
+            self.finished.emit(success, message)
+        except Exception as e:
+            error_msg = f"{str(e)}\n{traceback.format_exc()}"
+            self.finished.emit(False, error_msg)
+
+
+class EEAuthWorker(QThread):
+    """Worker thread that runs ee.Authenticate() in the background.
+
+    Launches the authentication subprocess which opens a browser for
+    OAuth, then waits for the user to complete authentication.
+
+    Signals:
+        progress: Emitted with (percent: int, message: str) during auth.
+        finished: Emitted with (success: bool, message: str) when done.
+    """
+
+    progress = pyqtSignal(int, str)
+    finished = pyqtSignal(bool, str)
+
+    def __init__(self, parent=None):
+        """Initialize the EE authentication worker.
+
+        Args:
+            parent: Parent QObject.
+        """
+        super().__init__(parent)
+
+    def run(self):
+        """Run ee.Authenticate() in the venv Python."""
+        try:
+            from ..core.venv_manager import authenticate_ee
+
+            success, message = authenticate_ee(
+                progress_callback=lambda percent, msg: self.progress.emit(percent, msg),
             )
             self.finished.emit(success, message)
         except Exception as e:
