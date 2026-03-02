@@ -38,6 +38,7 @@ class DependencyDockWidget(QDockWidget):
         self.iface = iface
         self._deps_worker = None
         self._auth_worker = None
+        self._has_emitted_success = False
 
         self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         self._setup_ui()
@@ -144,7 +145,11 @@ class DependencyDockWidget(QDockWidget):
         layout.addStretch()
 
     def _refresh_deps_status(self):
-        """Refresh the dependency status display."""
+        """Refresh the dependency status display.
+
+        If all dependencies are already installed, emits install_succeeded
+        so the main plugin can proceed with the pending callback.
+        """
         from ..core.venv_manager import check_dependencies
 
         all_ok, missing, installed = check_dependencies()
@@ -165,6 +170,9 @@ class DependencyDockWidget(QDockWidget):
         if all_ok:
             self._install_btn.setText("All Dependencies Installed")
             self._update_auth_status()
+            if not self._has_emitted_success:
+                self._has_emitted_success = True
+                self.install_succeeded.emit()
         else:
             self._install_btn.setText(f"Install Dependencies ({len(missing)} missing)")
             self._auth_group.setVisible(False)
@@ -244,6 +252,7 @@ class DependencyDockWidget(QDockWidget):
             self.iface.messageBar().pushSuccess(
                 "GEE Data Catalogs", "Dependencies installed successfully!"
             )
+            self._has_emitted_success = True
             self.install_succeeded.emit()
 
             # Check if EE credentials exist and show auth section

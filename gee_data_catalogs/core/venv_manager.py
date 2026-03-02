@@ -917,11 +917,6 @@ def get_venv_status() -> Tuple[bool, str]:
     Returns:
         A tuple of (is_ready, status_message).
     """
-    from .python_manager import standalone_python_exists
-
-    if not standalone_python_exists():
-        return False, "Dependencies not installed"
-
     if not venv_exists():
         return False, "Virtual environment not configured"
 
