@@ -229,12 +229,25 @@ class GeeDataCatalogs:
             callback()
             return
 
-        from .core.venv_manager import ensure_venv_packages_available, get_venv_status
+        from .core.venv_manager import (
+            check_dependencies,
+            ensure_venv_packages_available,
+            get_venv_status,
+        )
 
         is_ready, status_msg = get_venv_status()
 
         if is_ready:
             ensure_venv_packages_available()
+            self._deps_ready = True
+            self._try_auto_init_ee()
+            callback()
+            return
+
+        # Fallback: packages may already be available on sys.path
+        # (e.g., installed via conda, pixi, or system pip).
+        all_ok, _missing, _installed = check_dependencies()
+        if all_ok:
             self._deps_ready = True
             self._try_auto_init_ee()
             callback()
