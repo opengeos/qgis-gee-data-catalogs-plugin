@@ -40,12 +40,12 @@ PYTHON_VERSIONS = {
 }
 
 
-def _log(message: str, level=Qgis.Info):
+def _log(message: str, level=Qgis.MessageLevel.Info):
     """Log a message to the QGIS message log.
 
     Args:
         message: The message to log.
-        level: The log level (Qgis.Info, Qgis.Warning, Qgis.Critical).
+        level: The log level (Qgis.MessageLevel.Info, Qgis.MessageLevel.Warning, Qgis.MessageLevel.Critical).
     """
     QgsMessageLog.logMessage(str(message), PLUGIN_NAME, level=level)
 
@@ -216,7 +216,7 @@ def download_python_standalone(
                 )
             else:
                 error_msg = f"Download failed: {error_msg}"
-            _log(error_msg, Qgis.Critical)
+            _log(error_msg, Qgis.MessageLevel.Critical)
             return False, error_msg
 
         if cancel_check and cancel_check():
@@ -266,7 +266,7 @@ def download_python_standalone(
         return False, "Download cancelled"
     except Exception as e:
         error_msg = f"Installation failed: {str(e)}"
-        _log(error_msg, Qgis.Critical)
+        _log(error_msg, Qgis.MessageLevel.Critical)
 
         if sys.platform == "win32":
             error_lower = str(e).lower()
@@ -336,14 +336,17 @@ def verify_standalone_python() -> Tuple[bool, str]:
             if not version_output.startswith(
                 f"{sys.version_info.major}.{sys.version_info.minor}"
             ):
-                _log(f"Python version mismatch: got {version_output}", Qgis.Warning)
+                _log(
+                    f"Python version mismatch: got {version_output}",
+                    Qgis.MessageLevel.Warning,
+                )
                 return False, f"Version mismatch: {version_output}"
 
             _log(f"Verified Python standalone: {version_output}")
             return True, f"Python {version_output} verified"
         else:
             error = result.stderr or "Unknown error"
-            _log(f"Python verification failed: {error}", Qgis.Warning)
+            _log(f"Python verification failed: {error}", Qgis.MessageLevel.Warning)
             return False, f"Verification failed: {error[:100]}"
 
     except subprocess.TimeoutExpired:
@@ -367,5 +370,5 @@ def remove_standalone_python() -> Tuple[bool, str]:
         return True, "Standalone Python removed"
     except Exception as e:
         error_msg = f"Failed to remove: {str(e)}"
-        _log(error_msg, Qgis.Warning)
+        _log(error_msg, Qgis.MessageLevel.Warning)
         return False, error_msg

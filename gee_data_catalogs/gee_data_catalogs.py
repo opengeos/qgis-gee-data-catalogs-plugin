@@ -268,7 +268,9 @@ class GeeDataCatalogs:
 
             self._deps_dock = DependencyDockWidget(self.iface, self.iface.mainWindow())
             self._deps_dock.setObjectName("GeeDataCatalogsDeps")
-            self.iface.addDockWidget(Qt.RightDockWidgetArea, self._deps_dock)
+            self.iface.addDockWidget(
+                Qt.DockWidgetArea.RightDockWidgetArea, self._deps_dock
+            )
             self._deps_dock.install_succeeded.connect(self._on_deps_installed)
             self._deps_dock.auth_succeeded.connect(self._on_auth_completed)
 
@@ -341,7 +343,7 @@ class GeeDataCatalogs:
                     QgsMessageLog.logMessage(
                         f"Auto-initializing Earth Engine with project from {project_source}: {project_id}",
                         "GEE Data Catalogs",
-                        Qgis.Info,
+                        Qgis.MessageLevel.Info,
                     )
                     initialize_ee(project=project_id)
                 except Exception as exc:
@@ -350,7 +352,7 @@ class GeeDataCatalogs:
                     QgsMessageLog.logMessage(
                         f"Auto-init EE failed: {exc}",
                         "GEE Data Catalogs",
-                        Qgis.Warning,
+                        Qgis.MessageLevel.Warning,
                     )
         except ImportError:
             # Dependencies not yet available - user can manually initialize
@@ -447,7 +449,7 @@ class GeeDataCatalogs:
                         QgsMessageLog.logMessage(
                             f"Initializing Earth Engine for project layers (using project from {project_source}): {project_id}",
                             "GEE Data Catalogs",
-                            Qgis.Info,
+                            Qgis.MessageLevel.Info,
                         )
                         init_ee_core(project=project_id)
                         initialized = True
@@ -455,7 +457,7 @@ class GeeDataCatalogs:
                         QgsMessageLog.logMessage(
                             f"EE init for project layers failed: {exc}",
                             "GEE Data Catalogs",
-                            Qgis.Warning,
+                            Qgis.MessageLevel.Warning,
                         )
 
                 if not initialized:
@@ -568,7 +570,9 @@ class GeeDataCatalogs:
             self._catalog_dock.visibilityChanged.connect(
                 self._on_catalog_visibility_changed
             )
-            self.iface.addDockWidget(Qt.RightDockWidgetArea, self._catalog_dock)
+            self.iface.addDockWidget(
+                Qt.DockWidgetArea.RightDockWidgetArea, self._catalog_dock
+            )
             self._catalog_dock.show()
             self._catalog_dock.raise_()
         except Exception as e:
@@ -610,7 +614,9 @@ class GeeDataCatalogs:
                 self._on_settings_visibility_changed
             )
             self._settings_dock.settings_saved.connect(self._try_auto_init_ee)
-            self.iface.addDockWidget(Qt.RightDockWidgetArea, self._settings_dock)
+            self.iface.addDockWidget(
+                Qt.DockWidgetArea.RightDockWidgetArea, self._settings_dock
+            )
             self._settings_dock.show()
             self._settings_dock.raise_()
         except Exception as e:
@@ -715,7 +721,7 @@ Google Earth Engine data catalogs directly in QGIS.</p>
 
         try:
             dialog = UpdateCheckerDialog(self.plugin_dir, self.iface.mainWindow())
-            dialog.exec_()
+            dialog.exec()
         except Exception as e:
             QMessageBox.critical(
                 self.iface.mainWindow(),

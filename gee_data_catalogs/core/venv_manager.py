@@ -28,12 +28,12 @@ REQUIRED_PACKAGES = [
 ]
 
 
-def _log(message: str, level=Qgis.Info):
+def _log(message: str, level=Qgis.MessageLevel.Info):
     """Log a message to the QGIS message log.
 
     Args:
         message: The message to log.
-        level: The log level (Qgis.Info, Qgis.Warning, Qgis.Critical).
+        level: The log level (Qgis.MessageLevel.Info, Qgis.MessageLevel.Warning, Qgis.MessageLevel.Critical).
     """
     QgsMessageLog.logMessage(str(message), PLUGIN_NAME, level=level)
 
@@ -270,7 +270,7 @@ def _get_system_python() -> str:
     if python_path and os.path.isfile(python_path):
         _log(
             f"Standalone Python unavailable, using system Python: {python_path}",
-            Qgis.Warning,
+            Qgis.MessageLevel.Warning,
         )
         return python_path
 
@@ -296,7 +296,10 @@ def _cleanup_partial_venv(venv_dir: str):
             shutil.rmtree(venv_dir, ignore_errors=True)
             _log(f"Cleaned up partial venv: {venv_dir}")
         except Exception:
-            _log(f"Could not clean up partial venv: {venv_dir}", Qgis.Warning)
+            _log(
+                f"Could not clean up partial venv: {venv_dir}",
+                Qgis.MessageLevel.Warning,
+            )
 
 
 def create_venv(
@@ -380,11 +383,14 @@ def create_venv(
                             _log("pip bootstrapped via ensurepip")
                         else:
                             err = ensurepip_result.stderr or ensurepip_result.stdout
-                            _log(f"ensurepip failed: {err[:200]}", Qgis.Warning)
+                            _log(
+                                f"ensurepip failed: {err[:200]}",
+                                Qgis.MessageLevel.Warning,
+                            )
                             _cleanup_partial_venv(venv_dir)
                             return False, f"Failed to bootstrap pip: {err[:200]}"
                     except Exception as e:
-                        _log(f"ensurepip exception: {e}", Qgis.Warning)
+                        _log(f"ensurepip exception: {e}", Qgis.MessageLevel.Warning)
                         _cleanup_partial_venv(venv_dir)
                         return False, f"Failed to bootstrap pip: {str(e)[:200]}"
 
@@ -395,19 +401,21 @@ def create_venv(
             error_msg = (
                 result.stderr or result.stdout or f"Return code {result.returncode}"
             )
-            _log(f"Failed to create venv: {error_msg}", Qgis.Critical)
+            _log(f"Failed to create venv: {error_msg}", Qgis.MessageLevel.Critical)
             _cleanup_partial_venv(venv_dir)
             return False, f"Failed to create venv: {error_msg[:200]}"
 
     except subprocess.TimeoutExpired:
-        _log("Virtual environment creation timed out", Qgis.Critical)
+        _log("Virtual environment creation timed out", Qgis.MessageLevel.Critical)
         _cleanup_partial_venv(venv_dir)
         return False, "Virtual environment creation timed out"
     except FileNotFoundError:
-        _log(f"Python executable not found: {system_python}", Qgis.Critical)
+        _log(
+            f"Python executable not found: {system_python}", Qgis.MessageLevel.Critical
+        )
         return False, f"Python not found: {system_python}"
     except Exception as e:
-        _log(f"Exception during venv creation: {str(e)}", Qgis.Critical)
+        _log(f"Exception during venv creation: {str(e)}", Qgis.MessageLevel.Critical)
         _cleanup_partial_venv(venv_dir)
         return False, f"Error: {str(e)[:200]}"
 
@@ -608,7 +616,7 @@ def _run_install(
             _log(
                 f"SSL error installing dependencies via {installer}, "
                 f"retrying with trusted hosts",
-                Qgis.Warning,
+                Qgis.MessageLevel.Warning,
             )
             retry_cmd = cmd + ssl_flags
             returncode, stdout, retry_stderr = _run_install_subprocess(
@@ -625,7 +633,7 @@ def _run_install(
             _log(
                 f"Network error installing dependencies via {installer}, "
                 f"retrying in 5s...",
-                Qgis.Warning,
+                Qgis.MessageLevel.Warning,
             )
             time.sleep(5)
             returncode, stdout, retry_stderr = _run_install_subprocess(
@@ -824,17 +832,19 @@ def verify_venv(
                 )
                 _log(
                     f"Package {package_name} verification failed: {error_detail}",
-                    Qgis.Warning,
+                    Qgis.MessageLevel.Warning,
                 )
                 return False, (
                     f"Package {package_name} is broken: {error_detail[:200]}"
                 )
 
         except subprocess.TimeoutExpired:
-            _log(f"Verification of {package_name} timed out", Qgis.Warning)
+            _log(f"Verification of {package_name} timed out", Qgis.MessageLevel.Warning)
             return False, f"Verification of {package_name} timed out"
         except Exception as e:
-            _log(f"Failed to verify {package_name}: {str(e)}", Qgis.Warning)
+            _log(
+                f"Failed to verify {package_name}: {str(e)}", Qgis.MessageLevel.Warning
+            )
             return False, f"Verification error: {package_name}"
 
     if progress_callback:
@@ -859,12 +869,12 @@ def ensure_venv_packages_available() -> bool:
         True if venv packages are available, False otherwise.
     """
     if not venv_exists():
-        _log("Venv does not exist, cannot load packages", Qgis.Warning)
+        _log("Venv does not exist, cannot load packages", Qgis.MessageLevel.Warning)
         return False
 
     site_packages = get_venv_site_packages()
     if site_packages is None:
-        _log(f"Venv site-packages not found in: {VENV_DIR}", Qgis.Warning)
+        _log(f"Venv site-packages not found in: {VENV_DIR}", Qgis.MessageLevel.Warning)
         return False
 
     if site_packages not in sys.path:
@@ -903,7 +913,10 @@ def _patch_ee_module():
                 _log(f"Patched ee into {mod_name}")
 
     except ImportError as exc:
-        _log(f"Failed to import ee after venv injection: {exc}", Qgis.Warning)
+        _log(
+            f"Failed to import ee after venv injection: {exc}",
+            Qgis.MessageLevel.Warning,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1022,7 +1035,7 @@ def create_venv_and_install(
             if fallback and os.path.isfile(fallback):
                 _log(
                     f"Standalone download failed, using system Python: {fallback}",
-                    Qgis.Warning,
+                    Qgis.MessageLevel.Warning,
                 )
             else:
                 return False, f"Failed to download Python: {msg}"
@@ -1051,7 +1064,7 @@ def create_venv_and_install(
             # Non-fatal: fall back to pip for venv creation and installation
             _log(
                 f"uv download failed ({msg}), will use pip instead",
-                Qgis.Warning,
+                Qgis.MessageLevel.Warning,
             )
         else:
             _log("uv package installer ready")
@@ -1182,7 +1195,7 @@ def authenticate_ee(
             return True, "Earth Engine authentication completed successfully"
         else:
             error = result.stderr or result.stdout or "Unknown error"
-            _log(f"EE authentication failed: {error[:200]}", Qgis.Warning)
+            _log(f"EE authentication failed: {error[:200]}", Qgis.MessageLevel.Warning)
             return False, f"Authentication failed: {error[:200]}"
 
     except subprocess.TimeoutExpired:
@@ -1222,9 +1235,9 @@ def cleanup_old_venv_directories() -> List[str]:
                     except Exception as e:
                         _log(
                             f"Failed to remove old venv {old_path}: {e}",
-                            Qgis.Warning,
+                            Qgis.MessageLevel.Warning,
                         )
     except Exception as e:
-        _log(f"Error scanning for old venvs: {e}", Qgis.Warning)
+        _log(f"Error scanning for old venvs: {e}", Qgis.MessageLevel.Warning)
 
     return removed
