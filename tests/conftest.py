@@ -5,16 +5,28 @@ running QGIS instance. The stub reproduces the real ``qgis.PyQt`` shim
 behavior on Qt6: it re-exports ``QAction``, ``QActionGroup`` and ``QShortcut``
 from ``PyQt6.QtGui`` under ``qgis.PyQt.QtWidgets`` (they moved out of
 ``QtWidgets`` in Qt6).
+
+Two safety nets:
+- If PyQt6 is not installed (e.g. a PyQt5/QGIS 3.x dev shell), skip the entire
+  test module at collection time rather than crashing on import.
+- If a real ``qgis`` package is importable (someone is running pytest inside
+  a real QGIS/PyQGIS env), do nothing. Real bindings beat a stub.
 """
 
+import importlib.util
 import sys
 import types
 from unittest.mock import MagicMock
 
-import PyQt6.QtCore
-import PyQt6.QtGui
-import PyQt6.QtNetwork
-import PyQt6.QtWidgets
+import pytest
+
+try:
+    import PyQt6.QtCore
+    import PyQt6.QtGui
+    import PyQt6.QtNetwork
+    import PyQt6.QtWidgets
+except ImportError as exc:
+    pytest.skip(f"PyQt6 is required for these tests: {exc}", allow_module_level=True)
 
 
 def _install_qgis_stub() -> None:
@@ -59,4 +71,7 @@ def _install_qgis_stub() -> None:
         setattr(qgis, name, stub)
 
 
-_install_qgis_stub()
+# Only install the stub when no real qgis bindings are available; running
+# pytest inside a real QGIS/PyQGIS environment must use the real bindings.
+if importlib.util.find_spec("qgis") is None:
+    _install_qgis_stub()
