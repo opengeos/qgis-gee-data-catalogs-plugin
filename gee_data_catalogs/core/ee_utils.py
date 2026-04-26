@@ -84,7 +84,7 @@ def initialize_ee(project: str = None, credentials: Any = None) -> bool:
         QgsMessageLog.logMessage(
             f"Attempting to initialize Earth Engine with project: {project if project else 'None'}",
             "GEE Data Catalogs",
-            Qgis.Info,
+            Qgis.MessageLevel.Info,
         )
 
         # Initialize without explicitly passing credentials=None
@@ -106,7 +106,7 @@ def initialize_ee(project: str = None, credentials: Any = None) -> bool:
         QgsMessageLog.logMessage(
             "Earth Engine initialized successfully!",
             "GEE Data Catalogs",
-            Qgis.Success,
+            Qgis.MessageLevel.Success,
         )
         return True
     except Exception as e:
@@ -149,14 +149,14 @@ def try_auto_initialize_ee() -> bool:
         QgsMessageLog.logMessage(
             f"Earth Engine auto-initialized with project: {project}",
             "GEE Data Catalogs",
-            Qgis.Info,
+            Qgis.MessageLevel.Info,
         )
         return True
     except Exception as e:
         QgsMessageLog.logMessage(
             f"Failed to auto-initialize Earth Engine: {e}",
             "GEE Data Catalogs",
-            Qgis.Warning,
+            Qgis.MessageLevel.Warning,
         )
         return False
 
@@ -389,19 +389,19 @@ def _store_ee_layer_metadata(
         try:
             # Try to get the asset ID from the image
             asset_id = ee_object.get("system:id").getInfo()
-        except Exception:
+        except Exception:  # nosec B110
             pass
     elif isinstance(ee_object, ee.ImageCollection):
         object_type = "ImageCollection"
         try:
             asset_id = ee_object.get("system:id").getInfo()
-        except Exception:
+        except Exception:  # nosec B110
             pass
     elif isinstance(ee_object, ee.FeatureCollection):
         object_type = "FeatureCollection"
         try:
             asset_id = ee_object.get("system:id").getInfo()
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     # Store metadata as custom properties
@@ -492,7 +492,7 @@ def refresh_ee_layer(layer: QgsRasterLayer) -> bool:
         QgsMessageLog.logMessage(
             f"Refreshed EE layer: {layer.name()}",
             "GEE Data Catalogs",
-            Qgis.Info,
+            Qgis.MessageLevel.Info,
         )
         return True
 
@@ -500,7 +500,7 @@ def refresh_ee_layer(layer: QgsRasterLayer) -> bool:
         QgsMessageLog.logMessage(
             f"Failed to refresh EE layer '{layer.name()}': {e}",
             "GEE Data Catalogs",
-            Qgis.Warning,
+            Qgis.MessageLevel.Warning,
         )
         return False
 
@@ -569,7 +569,7 @@ def detect_asset_type(asset_id: str) -> str:
         fc = ee.FeatureCollection(asset_id)
         fc.size().getInfo()
         return "FeatureCollection"
-    except Exception:
+    except Exception:  # nosec B110
         pass
 
     return "Unknown"
@@ -613,7 +613,7 @@ def load_ee_asset(asset_id: str, asset_type: str = None) -> Any:
                 else:
                     obj.size().getInfo()
                 return obj
-            except Exception:
+            except Exception:  # nosec B112
                 continue
         raise ValueError(f"Could not load asset: {asset_id}")
 

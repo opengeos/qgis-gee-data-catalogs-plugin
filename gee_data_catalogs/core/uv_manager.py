@@ -30,12 +30,12 @@ UV_DIR = os.path.join(CACHE_DIR, "uv")
 UV_VERSION = "0.10.6"
 
 
-def _log(message: str, level=Qgis.Info):
+def _log(message: str, level=Qgis.MessageLevel.Info):
     """Log a message to the QGIS message log.
 
     Args:
         message: The message to log.
-        level: The log level (Qgis.Info, Qgis.Warning, Qgis.Critical).
+        level: The log level (Qgis.MessageLevel.Info, Qgis.MessageLevel.Warning, Qgis.MessageLevel.Critical).
     """
     QgsMessageLog.logMessage(str(message), PLUGIN_NAME, level=level)
 
@@ -143,7 +143,7 @@ def download_uv(
                 )
             else:
                 error_msg = f"Download failed: {error_msg}"
-            _log(error_msg, Qgis.Critical)
+            _log(error_msg, Qgis.MessageLevel.Critical)
             return False, error_msg
 
         if cancel_check and cancel_check():
@@ -223,7 +223,7 @@ def download_uv(
         return False, "Download cancelled"
     except Exception as e:
         error_msg = f"uv installation failed: {str(e)}"
-        _log(error_msg, Qgis.Critical)
+        _log(error_msg, Qgis.MessageLevel.Critical)
         return False, error_msg
     finally:
         if os.path.exists(temp_path):
@@ -284,7 +284,7 @@ def verify_uv() -> Tuple[bool, str]:
             return True, version_output
         else:
             error = result.stderr or "Unknown error"
-            _log(f"uv verification failed: {error}", Qgis.Warning)
+            _log(f"uv verification failed: {error}", Qgis.MessageLevel.Warning)
             return False, f"Verification failed: {error[:100]}"
 
     except subprocess.TimeoutExpired:
@@ -308,5 +308,5 @@ def remove_uv() -> Tuple[bool, str]:
         return True, "uv removed"
     except Exception as e:
         error_msg = f"Failed to remove uv: {str(e)}"
-        _log(error_msg, Qgis.Warning)
+        _log(error_msg, Qgis.MessageLevel.Warning)
         return False, error_msg

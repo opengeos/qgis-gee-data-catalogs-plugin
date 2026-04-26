@@ -40,7 +40,9 @@ class DependencyDockWidget(QDockWidget):
         self._auth_worker = None
         self._has_emitted_success = False
 
-        self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        self.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
         self._setup_ui()
         self._refresh_deps_status()
 
@@ -58,7 +60,7 @@ class DependencyDockWidget(QDockWidget):
         header_font.setPointSize(12)
         header_font.setBold(True)
         header.setFont(header_font)
-        header.setAlignment(Qt.AlignCenter)
+        header.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(header)
 
         # Info label
@@ -71,7 +73,7 @@ class DependencyDockWidget(QDockWidget):
             "Your QGIS Python environment will not be modified."
         )
         info.setWordWrap(True)
-        info.setTextFormat(Qt.RichText)
+        info.setTextFormat(Qt.TextFormat.RichText)
         layout.addWidget(info)
 
         # Package status group

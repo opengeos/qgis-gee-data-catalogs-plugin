@@ -206,10 +206,12 @@ class ThumbnailLoaderThread(QThread):
         try:
             import base64
             from urllib.request import urlopen, Request
+            from ..core._net import require_https
 
             # Add user agent to avoid 403 errors
+            require_https(self.thumbnail_url)
             req = Request(self.thumbnail_url, headers={"User-Agent": "Mozilla/5.0"})
-            with urlopen(req, timeout=10) as response:
+            with urlopen(req, timeout=10) as response:  # nosec B310
                 img_data = response.read()
                 img_base64 = base64.b64encode(img_data).decode("utf-8")
                 # Determine image format from URL
@@ -255,7 +257,7 @@ class ImageListLoaderThread(QThread):
                         date_str = datetime.fromtimestamp(timestamp / 1000).strftime(
                             "%Y-%m-%d"
                         )
-                    except Exception:
+                    except Exception:  # nosec B110
                         pass
 
                 images_info.append(
@@ -1088,7 +1090,7 @@ class TimeSeriesExportWorkerThread(QThread):
                     QgsMessageLog.logMessage(
                         f"Failed to export image {i + 1} ({label}): {error_msg}",
                         "GEE Data Catalogs",
-                        Qgis.Warning,
+                        Qgis.MessageLevel.Warning,
                     )
 
             self.finished.emit(successful_paths, failed_indices)
@@ -1269,7 +1271,7 @@ class TimeSeriesChartDialog(QWidget):
         super().__init__(parent)
         self.setWindowTitle("Time Series Chart")
         self.setMinimumSize(800, 600)
-        self.setWindowFlags(Qt.Window)
+        self.setWindowFlags(Qt.WindowType.Window)
 
         self._data = None
         self._multi_data = {}  # Dict mapping location_id to data
@@ -1290,7 +1292,7 @@ class TimeSeriesChartDialog(QWidget):
         band_layout = QHBoxLayout()
         band_layout.addWidget(QLabel("Select Bands:"))
         self.band_list = QListWidget()
-        self.band_list.setSelectionMode(QListWidget.MultiSelection)
+        self.band_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
         self.band_list.setMaximumHeight(100)
         self.band_list.itemSelectionChanged.connect(self._update_chart)
         band_layout.addWidget(self.band_list)
@@ -1659,7 +1661,7 @@ class TimeSeriesChartDialog(QWidget):
         if self._has_matplotlib and self._multi_data:
             try:
                 self.figure.autofmt_xdate(rotation=45)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
         self.figure.tight_layout()
@@ -1683,11 +1685,14 @@ class TimeSeriesChartDialog(QWidget):
         metadata = self._data.get("metadata", {})
         asset_id = metadata.get("asset_id", "").split("/")[-1]
 
-        # Generate random colors for each band
-        random.seed(42)  # Consistent colors across updates
-        colors = []
-        for _ in range(len(selected_bands)):
-            colors.append((random.random(), random.random(), random.random()))
+        # Generate visually distinct, deterministic colors for each band.
+        # random is seeded with a constant; this is for visualization only,
+        # not for any security or cryptographic purpose.
+        random.seed(42)
+        colors = [
+            (random.random(), random.random(), random.random())  # nosec B311
+            for _ in range(len(selected_bands))
+        ]
 
         # Check if stacked (subplots) mode
         if self.stack_lines_check.isChecked() and len(selected_bands) > 1:
@@ -2251,7 +2256,7 @@ class PixelTimeSeriesMapTool:
             def __init__(self, canvas, callback):
                 super().__init__(canvas)
                 self.callback = callback
-                self.setCursor(Qt.CrossCursor)
+                self.setCursor(Qt.CursorShape.CrossCursor)
 
             def canvasReleaseEvent(self, event):
                 # Get click coordinates
@@ -2307,7 +2312,7 @@ class InspectorMapTool:
             def __init__(self, canvas, callback):
                 super().__init__(canvas)
                 self.callback = callback
-                self.setCursor(Qt.CrossCursor)
+                self.setCursor(Qt.CursorShape.CrossCursor)
 
             def canvasReleaseEvent(self, event):
                 # Get click coordinates
@@ -2401,7 +2406,9 @@ class CatalogDockWidget(QDockWidget):
         self._pixel_locations = []  # List of (lon, lat, id) tuples
         self._location_counter = 0  # Counter for unique location IDs
 
-        self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        self.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
         self.setMinimumWidth(380)
 
         self._setup_ui()
@@ -2523,7 +2530,7 @@ class CatalogDockWidget(QDockWidget):
             QgsMessageLog.logMessage(
                 f"Error getting map extent in WGS84: {e}",
                 "GEE Data Catalogs",
-                Qgis.Warning,
+                Qgis.MessageLevel.Warning,
             )
             return None
 
@@ -2725,7 +2732,7 @@ class CatalogDockWidget(QDockWidget):
             def _showRubberBand(self):
                 if self.rubberBand is None:
                     self.rubberBand = QgsRubberBand(
-                        self.canvas, QgsWkbTypes.PolygonGeometry
+                        self.canvas, QgsWkbTypes.GeometryType.PolygonGeometry
                     )
                     self.rubberBand.setColor(QColor(255, 0, 0, 50))  # Light red fill
                     self.rubberBand.setStrokeColor(
@@ -2733,7 +2740,7 @@ class CatalogDockWidget(QDockWidget):
                     )  # Red outline
                     self.rubberBand.setWidth(2)
 
-                self.rubberBand.reset(QgsWkbTypes.PolygonGeometry)
+                self.rubberBand.reset(QgsWkbTypes.GeometryType.PolygonGeometry)
                 if self.startPoint and self.endPoint:
                     point1 = QgsPointXY(self.startPoint.x(), self.startPoint.y())
                     point2 = QgsPointXY(self.endPoint.x(), self.startPoint.y())
@@ -2822,7 +2829,7 @@ class CatalogDockWidget(QDockWidget):
             QgsMessageLog.logMessage(
                 f"Error drawing bounding box: {e}",
                 "GEE Data Catalogs",
-                Qgis.Warning,
+                Qgis.MessageLevel.Warning,
             )
 
     def _clear_drawn_bbox_ts(self):
@@ -2878,7 +2885,7 @@ class CatalogDockWidget(QDockWidget):
         layout.addLayout(source_layout)
 
         # Splitter for tree and details
-        splitter = QSplitter(Qt.Vertical)
+        splitter = QSplitter(Qt.Orientation.Vertical)
         layout.addWidget(splitter)
 
         # Category tree
@@ -2976,7 +2983,7 @@ class CatalogDockWidget(QDockWidget):
         layout.addWidget(search_group)
 
         # Splitter for results and details
-        splitter = QSplitter(Qt.Vertical)
+        splitter = QSplitter(Qt.Orientation.Vertical)
         layout.addWidget(splitter)
 
         # Results
@@ -3273,11 +3280,11 @@ class CatalogDockWidget(QDockWidget):
         # Current time label
         self.ts_current_label = QLabel("No time series loaded")
         self.ts_current_label.setStyleSheet("font-weight: bold; font-size: 12px;")
-        self.ts_current_label.setAlignment(Qt.AlignCenter)
+        self.ts_current_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         slider_layout.addWidget(self.ts_current_label)
 
         # Time slider
-        self.ts_time_slider = QSlider(Qt.Horizontal)
+        self.ts_time_slider = QSlider(Qt.Orientation.Horizontal)
         self.ts_time_slider.setMinimum(0)
         self.ts_time_slider.setMaximum(0)
         self.ts_time_slider.setValue(0)
@@ -3707,7 +3714,9 @@ class CatalogDockWidget(QDockWidget):
 
         # Image list (for individual mode)
         self.image_list_widget = QListWidget()
-        self.image_list_widget.setSelectionMode(QListWidget.ExtendedSelection)
+        self.image_list_widget.setSelectionMode(
+            QListWidget.SelectionMode.ExtendedSelection
+        )
         self.image_list_widget.setMaximumHeight(150)
         self.image_list_widget.setVisible(False)
         image_layout.addWidget(self.image_list_widget)
@@ -3803,7 +3812,7 @@ class CatalogDockWidget(QDockWidget):
         layout.addWidget(instructions)
 
         # Create splitter for code input and output
-        code_splitter = QSplitter(Qt.Vertical)
+        code_splitter = QSplitter(Qt.Orientation.Vertical)
 
         # Code input
         self.code_input = QPlainTextEdit()
@@ -4007,6 +4016,7 @@ class CatalogDockWidget(QDockWidget):
         import time
         from urllib.request import urlopen, Request
         from urllib.error import URLError
+        from ..core._net import require_https
 
         # Cache file path
         cache_dir = os.path.join(tempfile.gettempdir(), "gee_data_catalogs")
@@ -4022,21 +4032,22 @@ class CatalogDockWidget(QDockWidget):
                         data = json.load(f)
                         self._js_code_cache = self._parse_js_code_data(data)
                         return self._js_code_cache
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
         # Download from GitHub
         url = "https://github.com/opengeos/datasets/releases/download/gee/f.json"
         try:
+            require_https(url)
             req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urlopen(req, timeout=30) as response:
+            with urlopen(req, timeout=30) as response:  # nosec B310
                 data = json.loads(response.read().decode("utf-8"))
 
                 # Save to cache file
                 try:
                     with open(cache_file, "w", encoding="utf-8") as f:
                         json.dump(data, f)
-                except Exception:
+                except Exception:  # nosec B110
                     pass
 
                 self._js_code_cache = self._parse_js_code_data(data)
@@ -4045,7 +4056,7 @@ class CatalogDockWidget(QDockWidget):
             QgsMessageLog.logMessage(
                 f"Failed to load JavaScript code cache: {e}",
                 "GEE Data Catalogs",
-                Qgis.Warning,
+                Qgis.MessageLevel.Warning,
             )
             self._js_code_cache = {}
             return self._js_code_cache
@@ -4139,7 +4150,7 @@ class CatalogDockWidget(QDockWidget):
             QgsMessageLog.logMessage(
                 f"Failed to run JavaScript code for {asset_id}: {e}",
                 "GEE Data Catalogs",
-                Qgis.Warning,
+                Qgis.MessageLevel.Warning,
             )
             return False
 
@@ -4182,7 +4193,7 @@ class CatalogDockWidget(QDockWidget):
                         clipboard = QApplication.clipboard()
                         clipboard.setText(py_code)
                         return
-                except Exception:
+                except Exception:  # nosec B110
                     # If conversion fails, fall through to generate basic snippet
                     pass
 
@@ -4260,7 +4271,7 @@ class CatalogDockWidget(QDockWidget):
             QgsMessageLog.logMessage(
                 f"Failed to copy snippet for {asset_id}: {e}",
                 "GEE Data Catalogs",
-                Qgis.Info,
+                Qgis.MessageLevel.Info,
             )
 
     def _execute_code_internal(self, code):
@@ -4322,7 +4333,11 @@ class CatalogDockWidget(QDockWidget):
         namespace["Map"] = QGISMap
 
         try:
-            exec(code, namespace)
+            # User-authored Earth Engine code from the in-plugin code console.
+            # Executing it is the feature: see the docstring of the surrounding
+            # method. The namespace is pre-populated with geemap/Map for the
+            # user's convenience and is not derived from untrusted input.
+            exec(code, namespace)  # nosec B102
         finally:
             # Restore original modules
             if original_geemap is not None:
@@ -4339,7 +4354,7 @@ class CatalogDockWidget(QDockWidget):
         if not code.strip():
             return
 
-        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
+        QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
 
         try:
             import sys
@@ -4396,8 +4411,11 @@ class CatalogDockWidget(QDockWidget):
             namespace["Map"] = QGISMap
 
             try:
-                # Execute the code
-                exec(code, namespace)
+                # Execute user-authored Earth Engine code from the code console.
+                # Running it is the feature: the user typed/pasted the code into
+                # the dock and clicked Run. The namespace is pre-populated with
+                # geemap/Map and is not derived from untrusted input.
+                exec(code, namespace)  # nosec B102
                 self._show_success("Code executed successfully!")
             finally:
                 # Restore original modules
@@ -4909,10 +4927,12 @@ class CatalogDockWidget(QDockWidget):
         canvas = self.iface.mapCanvas()
 
         # Create a rubber band for visual feedback
-        self._export_rubber_band = QgsRubberBand(canvas, QgsWkbTypes.PolygonGeometry)
-        self._export_rubber_band.setColor(Qt.red)
+        self._export_rubber_band = QgsRubberBand(
+            canvas, QgsWkbTypes.GeometryType.PolygonGeometry
+        )
+        self._export_rubber_band.setColor(Qt.GlobalColor.red)
         self._export_rubber_band.setWidth(2)
-        self._export_rubber_band.setFillColor(Qt.transparent)
+        self._export_rubber_band.setFillColor(Qt.GlobalColor.transparent)
 
         # Store start point
         self._export_bbox_start = None
@@ -4928,7 +4948,9 @@ class CatalogDockWidget(QDockWidget):
             def canvasPressEvent(tool_self, event):
                 tool_self.start_point = tool_self.toMapCoordinates(event.pos())
                 tool_self.is_drawing = True
-                tool_self.dock._export_rubber_band.reset(QgsWkbTypes.PolygonGeometry)
+                tool_self.dock._export_rubber_band.reset(
+                    QgsWkbTypes.GeometryType.PolygonGeometry
+                )
 
             def canvasMoveEvent(tool_self, event):
                 if not tool_self.is_drawing:
@@ -5089,9 +5111,9 @@ class CatalogDockWidget(QDockWidget):
             self,
             "Export Complete",
             f"Export successful!\n{output_path}\n\nAdd layer to map?",
-            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
-        if reply == QMessageBox.Yes:
+        if reply == QMessageBox.StandardButton.Yes:
             layer_name = os.path.splitext(os.path.basename(output_path))[0]
             if output_path.lower().endswith(".tif"):
                 from qgis.core import QgsRasterLayer
@@ -5287,9 +5309,9 @@ class CatalogDockWidget(QDockWidget):
             self,
             "Export Complete",
             f"Image exported successfully to:\n{output_path}\n\nAdd layer to map?",
-            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
-        if reply == QMessageBox.Yes:
+        if reply == QMessageBox.StandardButton.Yes:
             from qgis.core import QgsRasterLayer
 
             layer_name = os.path.splitext(os.path.basename(output_path))[0]
@@ -5394,9 +5416,9 @@ class CatalogDockWidget(QDockWidget):
             self,
             "Export Complete",
             f"Features exported successfully to:\n{output_path}\n\nAdd layer to map?",
-            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
-        if reply == QMessageBox.Yes:
+        if reply == QMessageBox.StandardButton.Yes:
             from qgis.core import QgsVectorLayer
 
             layer = QgsVectorLayer(
@@ -5501,7 +5523,7 @@ class CatalogDockWidget(QDockWidget):
                             source_display,
                         ]
                     )
-                    ds_item.setData(0, Qt.UserRole, dataset)
+                    ds_item.setData(0, Qt.ItemDataRole.UserRole, dataset)
                     ds_item.setToolTip(0, dataset.get("id", ""))
                     cat_item.addChild(ds_item)
 
@@ -5523,7 +5545,7 @@ class CatalogDockWidget(QDockWidget):
 
             for j in range(cat_item.childCount()):
                 ds_item = cat_item.child(j)
-                dataset = ds_item.data(0, Qt.UserRole)
+                dataset = ds_item.data(0, Qt.ItemDataRole.UserRole)
 
                 if source is None or dataset.get("source") == source:
                     ds_item.setHidden(False)
@@ -5550,7 +5572,7 @@ class CatalogDockWidget(QDockWidget):
 
     def _on_dataset_selected(self, item, _column):
         """Handle dataset selection in tree."""
-        dataset = item.data(0, Qt.UserRole)
+        dataset = item.data(0, Qt.ItemDataRole.UserRole)
         if dataset:
             self._selected_dataset = dataset
             self._show_dataset_info(dataset)
@@ -5571,7 +5593,7 @@ class CatalogDockWidget(QDockWidget):
 
     def _on_dataset_double_clicked(self, item, _column):
         """Handle double-click on dataset."""
-        dataset = item.data(0, Qt.UserRole)
+        dataset = item.data(0, Qt.ItemDataRole.UserRole)
         if dataset:
             self._add_dataset_to_map(dataset)
 
@@ -5691,16 +5713,18 @@ class CatalogDockWidget(QDockWidget):
             try:
                 import base64
                 from urllib.request import urlopen, Request
+                from ..core._net import require_https
 
+                require_https(thumbnail_url)
                 req = Request(thumbnail_url, headers={"User-Agent": "Mozilla/5.0"})
-                with urlopen(req, timeout=5) as response:
+                with urlopen(req, timeout=5) as response:  # nosec B310
                     img_data = response.read()
                     img_base64 = base64.b64encode(img_data).decode("utf-8")
                     img_format = "png" if thumbnail_url.endswith(".png") else "jpeg"
                     info_lines.append(
                         f"<br><img src='data:image/{img_format};base64,{img_base64}' width='300' style='border: 1px solid #ccc; border-radius: 4px;'><br>"
                     )
-            except Exception:
+            except Exception:  # nosec B110
                 # If thumbnail loading fails, just skip it
                 pass
 
@@ -5786,7 +5810,7 @@ class CatalogDockWidget(QDockWidget):
                             break
                         except ValueError:
                             continue
-                except Exception:
+                except Exception:  # nosec B110
                     pass
 
             if end_date:
@@ -5800,7 +5824,7 @@ class CatalogDockWidget(QDockWidget):
                             break
                         except ValueError:
                             continue
-                except Exception:
+                except Exception:  # nosec B110
                     pass
 
             # Generate and copy time series Python code snippet to clipboard
@@ -5892,7 +5916,7 @@ for f in data['features']:
             self._show_error("Dataset has no ID")
             return
 
-        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
+        QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
 
         try:
             self._show_progress(f"Loading {asset_id}...")
@@ -5948,7 +5972,7 @@ for f in data['features']:
                 QgsMessageLog.logMessage(
                     f"Loading as {catalog_type} failed for {asset_id}: {type_err}",
                     "GEE Data Catalogs",
-                    Qgis.Warning,
+                    Qgis.MessageLevel.Warning,
                 )
 
             # If loading based on catalog type failed, auto-detect
@@ -6010,7 +6034,7 @@ for f in data['features']:
                         dataset.get("source", "unknown"),
                     ]
                 )
-                item.setData(0, Qt.UserRole, dataset)
+                item.setData(0, Qt.ItemDataRole.UserRole, dataset)
                 item.setToolTip(0, dataset.get("id", ""))
                 self.search_results.addTopLevelItem(item)
 
@@ -6024,7 +6048,7 @@ for f in data['features']:
 
     def _on_search_result_selected(self, item, _column):
         """Handle search result selection."""
-        dataset = item.data(0, Qt.UserRole)
+        dataset = item.data(0, Qt.ItemDataRole.UserRole)
         if dataset:
             self._selected_dataset = dataset
             self._show_search_dataset_info(dataset)
@@ -6039,7 +6063,7 @@ for f in data['features']:
 
     def _on_search_result_double_clicked(self, item, _column):
         """Handle double-click on search result."""
-        dataset = item.data(0, Qt.UserRole)
+        dataset = item.data(0, Qt.ItemDataRole.UserRole)
         if dataset:
             self._add_dataset_to_map(dataset)
 
@@ -6047,7 +6071,7 @@ for f in data['features']:
         """Add selected search result to map."""
         items = self.search_results.selectedItems()
         if items:
-            dataset = items[0].data(0, Qt.UserRole)
+            dataset = items[0].data(0, Qt.ItemDataRole.UserRole)
             if dataset:
                 self._add_dataset_to_map(dataset)
 
@@ -6055,7 +6079,7 @@ for f in data['features']:
         """Configure and add selected search result."""
         items = self.search_results.selectedItems()
         if items:
-            dataset = items[0].data(0, Qt.UserRole)
+            dataset = items[0].data(0, Qt.ItemDataRole.UserRole)
             if dataset:
                 # Populate the load tab with dataset info
                 self.dataset_id_input.setText(dataset.get("id", ""))
@@ -6067,7 +6091,7 @@ for f in data['features']:
         """Configure time series from selected search result."""
         items = self.search_results.selectedItems()
         if items:
-            dataset = items[0].data(0, Qt.UserRole)
+            dataset = items[0].data(0, Qt.ItemDataRole.UserRole)
             if dataset:
                 # Store as selected dataset and use common method
                 self._selected_dataset = dataset
@@ -6084,7 +6108,7 @@ for f in data['features']:
             QMessageBox.warning(self, "Warning", "Please enter an asset ID.")
             return
 
-        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
+        QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
         self.fetch_images_btn.setEnabled(False)
 
         try:
@@ -6144,7 +6168,7 @@ for f in data['features']:
         self.image_list_widget.clear()
         for img in images_info:
             item = QListWidgetItem(f"{img['date']} - {img['id'].split('/')[-1]}")
-            item.setData(Qt.UserRole, img)
+            item.setData(Qt.ItemDataRole.UserRole, img)
             self.image_list_widget.addItem(item)
 
         self._show_success(f"Found {len(images_info)} images")
@@ -6170,7 +6194,7 @@ for f in data['features']:
             QMessageBox.warning(self, "Warning", "Please enter an asset ID.")
             return
 
-        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
+        QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
 
         try:
             self._show_progress(f"Loading {asset_id}...")
@@ -6188,7 +6212,7 @@ for f in data['features']:
                 # Load each selected image
                 vis_params = self._build_vis_params()
                 for item in selected_items:
-                    img_info = item.data(Qt.UserRole)
+                    img_info = item.data(Qt.ItemDataRole.UserRole)
                     image_id = img_info["id"]
                     name = f"{self.layer_name_input.text().strip() or asset_id.split('/')[-1]} - {img_info['date']}"
 
@@ -6223,7 +6247,7 @@ for f in data['features']:
                         try:
                             ee_object = loader_fn(asset_id)
                             break
-                        except Exception:
+                        except Exception:  # nosec B112
                             continue
                     else:
                         raise ValueError(f"Could not load asset: {asset_id}")
@@ -6420,7 +6444,7 @@ for f in data['features']:
                 # Preview only selected items
                 selected_images = []
                 for item in selected_items:
-                    img_info = item.data(Qt.UserRole)
+                    img_info = item.data(Qt.ItemDataRole.UserRole)
                     if img_info:
                         selected_images.append(img_info)
                 self._show_progress(
@@ -6431,7 +6455,7 @@ for f in data['features']:
                 selected_images = []
                 for i in range(self.image_list_widget.count()):
                     item = self.image_list_widget.item(i)
-                    img_info = item.data(Qt.UserRole)
+                    img_info = item.data(Qt.ItemDataRole.UserRole)
                     if img_info:
                         selected_images.append(img_info)
                 self._show_progress(
@@ -6719,7 +6743,7 @@ for f in data['features']:
         if not code.strip():
             return
 
-        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
+        QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
 
         try:
             import sys
@@ -6776,8 +6800,11 @@ for f in data['features']:
             namespace["Map"] = QGISMap
 
             try:
-                # Execute the code
-                exec(code, namespace)
+                # Execute user-authored Earth Engine code from the code console.
+                # Running it is the feature: the user typed/pasted the code into
+                # the dock and clicked Run. The namespace is pre-populated with
+                # geemap/Map and is not derived from untrusted input.
+                exec(code, namespace)  # nosec B102
 
                 self.code_output.setPlainText("✓ Code executed successfully!")
                 self.code_output.setStyleSheet("color: green;")
@@ -6889,7 +6916,7 @@ for f in data['features']:
 
                         canvas.setExtent(extent)
                         canvas.refresh()
-                except Exception:
+                except Exception:  # nosec B110
                     # If centering fails, silently ignore
                     pass
 
@@ -7297,7 +7324,7 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
                 error_item = QTreeWidgetItem(
                     ["Error", data.get("error", "Unknown error")]
                 )
-                error_item.setForeground(1, Qt.red)
+                error_item.setForeground(1, Qt.GlobalColor.red)
                 layer_item.addChild(error_item)
 
             elif data.get("type") in ["Image", "ImageCollection"]:
@@ -7436,12 +7463,12 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
 
         # Generate a color for this marker (use consistent colors based on ID)
         random.seed(location_id)
-        r = random.randint(100, 255)
-        g = random.randint(50, 200)
-        b = random.randint(50, 200)
+        r = random.randint(100, 255)  # nosec B311
+        g = random.randint(50, 200)  # nosec B311
+        b = random.randint(50, 200)  # nosec B311
 
         # Create marker as a point rubber band
-        marker = QgsRubberBand(canvas, QgsWkbTypes.PointGeometry)
+        marker = QgsRubberBand(canvas, QgsWkbTypes.GeometryType.PointGeometry)
         marker.setColor(QColor(r, g, b, 220))
         marker.setFillColor(QColor(r, g, b, 180))
         marker.setWidth(2)
@@ -7541,7 +7568,7 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
             f"Extracting time series data for location {location_id}..."
         )
         self.pixel_status_label.setStyleSheet("color: #2980b9; font-size: 10px;")
-        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
+        QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
 
         # Store current location_id for the callback
         self._current_extraction_location_id = location_id
@@ -7730,7 +7757,7 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
         # Stop any existing playback
         self._stop_timeseries_playback()
 
-        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
+        QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
         self.ts_create_btn.setEnabled(False)
         self.ts_export_btn.setEnabled(False)
 
@@ -8043,7 +8070,7 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
         QgsMessageLog.logMessage(
             f"Exported image {index + 1}: {os.path.basename(output_path)}",
             "GEE Data Catalogs",
-            Qgis.Info,
+            Qgis.MessageLevel.Info,
         )
 
     def _on_ts_image_failed(self, index: int, error_message: str):
@@ -8061,7 +8088,7 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
         QgsMessageLog.logMessage(
             f"Failed to export {label}: {error_message}",
             "GEE Data Catalogs",
-            Qgis.Warning,
+            Qgis.MessageLevel.Warning,
         )
 
     def _on_ts_export_finished(self, successful_paths: list, failed_indices: list):
@@ -8122,7 +8149,7 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
         QgsMessageLog.logMessage(
             f"Time series export error: {error_message}",
             "GEE Data Catalogs",
-            Qgis.Critical,
+            Qgis.MessageLevel.Critical,
         )
         self._show_error(f"Export failed:\n{error_message}")
 
@@ -8409,7 +8436,7 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
             QMessageBox.warning(self, "Warning", "Please enter an asset ID.")
             return
 
-        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
+        QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
 
         try:
             start_date = self.ts_start_date.date().toString("yyyy-MM-dd")

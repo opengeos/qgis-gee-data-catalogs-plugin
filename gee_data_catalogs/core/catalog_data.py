@@ -17,6 +17,8 @@ from urllib.error import URLError, HTTPError
 
 from qgis.core import QgsMessageLog, Qgis, QgsSettings
 
+from ._net import require_https
+
 # URLs for catalog data
 OFFICIAL_CATALOG_TSV_URL = "https://raw.githubusercontent.com/opengeos/Earth-Engine-Catalog/master/gee_catalog.tsv"
 OFFICIAL_CATALOG_JSON_URL = "https://raw.githubusercontent.com/opengeos/Earth-Engine-Catalog/master/gee_catalog.json"
@@ -491,7 +493,9 @@ def _parse_json_catalog(content: str) -> List[Dict]:
                 datasets.append(dataset)
     except json.JSONDecodeError as e:
         QgsMessageLog.logMessage(
-            f"Failed to parse JSON catalog: {e}", "GEE Data Catalogs", Qgis.Warning
+            f"Failed to parse JSON catalog: {e}",
+            "GEE Data Catalogs",
+            Qgis.MessageLevel.Warning,
         )
 
     return datasets
@@ -607,7 +611,7 @@ def _parse_community_json(content: str) -> List[Dict]:
         QgsMessageLog.logMessage(
             f"Failed to parse community JSON catalog: {e}",
             "GEE Data Catalogs",
-            Qgis.Warning,
+            Qgis.MessageLevel.Warning,
         )
 
     return datasets
@@ -659,28 +663,33 @@ def fetch_official_catalog(use_cache: bool = True) -> List[Dict]:
     ]:
         try:
             QgsMessageLog.logMessage(
-                f"Fetching official catalog from: {url}", "GEE Data Catalogs", Qgis.Info
+                f"Fetching official catalog from: {url}",
+                "GEE Data Catalogs",
+                Qgis.MessageLevel.Info,
             )
-            with urlopen(url, timeout=30) as response:
+            require_https(url)
+            with urlopen(url, timeout=30) as response:  # nosec B310
                 content = response.read().decode("utf-8")
                 datasets = parser(content)
                 if datasets:
                     QgsMessageLog.logMessage(
                         f"Loaded {len(datasets)} datasets from official catalog",
                         "GEE Data Catalogs",
-                        Qgis.Info,
+                        Qgis.MessageLevel.Info,
                     )
                     _catalog_cache["official"] = datasets
                     return datasets
         except (HTTPError, URLError) as e:
             QgsMessageLog.logMessage(
-                f"Failed to fetch from {url}: {e}", "GEE Data Catalogs", Qgis.Warning
+                f"Failed to fetch from {url}: {e}",
+                "GEE Data Catalogs",
+                Qgis.MessageLevel.Warning,
             )
         except Exception as e:
             QgsMessageLog.logMessage(
                 f"Error parsing catalog from {url}: {e}",
                 "GEE Data Catalogs",
-                Qgis.Warning,
+                Qgis.MessageLevel.Warning,
             )
 
     return datasets
@@ -711,28 +720,31 @@ def fetch_community_catalog(use_cache: bool = True) -> List[Dict]:
             QgsMessageLog.logMessage(
                 f"Fetching community catalog from: {url}",
                 "GEE Data Catalogs",
-                Qgis.Info,
+                Qgis.MessageLevel.Info,
             )
-            with urlopen(url, timeout=30) as response:
+            require_https(url)
+            with urlopen(url, timeout=30) as response:  # nosec B310
                 content = response.read().decode("utf-8")
                 datasets = parser(content)
                 if datasets:
                     QgsMessageLog.logMessage(
                         f"Loaded {len(datasets)} datasets from community catalog",
                         "GEE Data Catalogs",
-                        Qgis.Info,
+                        Qgis.MessageLevel.Info,
                     )
                     _catalog_cache["community"] = datasets
                     return datasets
         except (HTTPError, URLError) as e:
             QgsMessageLog.logMessage(
-                f"Failed to fetch from {url}: {e}", "GEE Data Catalogs", Qgis.Warning
+                f"Failed to fetch from {url}: {e}",
+                "GEE Data Catalogs",
+                Qgis.MessageLevel.Warning,
             )
         except Exception as e:
             QgsMessageLog.logMessage(
                 f"Error parsing catalog from {url}: {e}",
                 "GEE Data Catalogs",
-                Qgis.Warning,
+                Qgis.MessageLevel.Warning,
             )
 
     return datasets
@@ -970,7 +982,9 @@ def clear_cache():
         "community": None,
         "last_update": None,
     }
-    QgsMessageLog.logMessage("Catalog cache cleared", "GEE Data Catalogs", Qgis.Info)
+    QgsMessageLog.logMessage(
+        "Catalog cache cleared", "GEE Data Catalogs", Qgis.MessageLevel.Info
+    )
 
 
 def refresh_catalogs() -> Dict:
