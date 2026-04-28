@@ -25,6 +25,7 @@ VENV_DIR = os.path.join(CACHE_DIR, "venv")
 REQUIRED_PACKAGES = [
     ("earthengine-api", ">=1.4.0"),
     ("geemap", ""),
+    ("GeoAgent", "[providers]>=1.0.0"),
 ]
 
 
@@ -777,6 +778,8 @@ def _get_verification_code(package_name: str) -> str:
     """
     if package_name == "earthengine-api":
         return "import ee; print(ee.__version__)"
+    if package_name == "GeoAgent":
+        return "import geoagent; print(geoagent.__version__)"
     import_name = package_name.replace("-", "_")
     return f"import {import_name}"
 
@@ -938,10 +941,18 @@ def get_venv_status() -> Tuple[bool, str]:
     if site_packages is None:
         return False, "Virtual environment incomplete"
 
-    # Check for earthengine-api marker (the 'ee' package directory)
-    ee_dir = os.path.join(site_packages, "ee")
-    if not os.path.isdir(ee_dir):
-        return False, "earthengine-api not installed"
+    if site_packages not in sys.path:
+        sys.path.insert(0, site_packages)
+
+    missing = []
+    for package_name, _version_spec in REQUIRED_PACKAGES:
+        try:
+            importlib.metadata.version(package_name)
+        except importlib.metadata.PackageNotFoundError:
+            missing.append(package_name)
+
+    if missing:
+        return False, f"Missing packages: {', '.join(missing)}"
 
     return True, "Dependencies ready"
 
