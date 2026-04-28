@@ -8937,4 +8937,10 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
         if self._timeseries_thread and self._timeseries_thread.isRunning():
             self._timeseries_thread.terminate()
             self._timeseries_thread.wait()
+
+        # Stop and wait for the AI assistant chat worker before deletion
+        ai_tab = getattr(self, "ai_assistant_tab", None)
+        if ai_tab is not None and hasattr(ai_tab, "shutdown"):
+            ai_tab.shutdown()
+
         event.accept()

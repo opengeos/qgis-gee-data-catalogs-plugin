@@ -205,6 +205,9 @@ class GeeDataCatalogs:
 
         # Remove dock widgets
         if self._catalog_dock:
+            ai_tab = getattr(self._catalog_dock, "ai_assistant_tab", None)
+            if ai_tab is not None and hasattr(ai_tab, "shutdown"):
+                ai_tab.shutdown()
             self.iface.removeDockWidget(self._catalog_dock)
             self._catalog_dock.deleteLater()
             self._catalog_dock = None

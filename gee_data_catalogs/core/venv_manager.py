@@ -941,15 +941,16 @@ def get_venv_status() -> Tuple[bool, str]:
     if site_packages is None:
         return False, "Virtual environment incomplete"
 
-    if site_packages not in sys.path:
-        sys.path.insert(0, site_packages)
+    installed_packages = {
+        (dist.metadata.get("Name") or "").lower()
+        for dist in importlib.metadata.distributions(path=[site_packages])
+    }
 
-    missing = []
-    for package_name, _version_spec in REQUIRED_PACKAGES:
-        try:
-            importlib.metadata.version(package_name)
-        except importlib.metadata.PackageNotFoundError:
-            missing.append(package_name)
+    missing = [
+        package_name
+        for package_name, _version_spec in REQUIRED_PACKAGES
+        if package_name.lower() not in installed_packages
+    ]
 
     if missing:
         return False, f"Missing packages: {', '.join(missing)}"

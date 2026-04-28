@@ -68,11 +68,14 @@ def _apply_environment_from_settings(settings):
     }
     for key, env_names in env_map.items():
         value = _setting(settings, key, "").strip()
+        if isinstance(env_names, str):
+            env_names = (env_names,)
         if value:
-            if isinstance(env_names, str):
-                env_names = (env_names,)
             for env_name in env_names:
                 os.environ[env_name] = value
+        else:
+            for env_name in env_names:
+                os.environ.pop(env_name, None)
 
 
 def _qt_value(enum_name, member_name):
@@ -234,10 +237,6 @@ class ChatWorker(QThread):
     def run(self):
         """Create a GeoAgent GEE Data Catalogs agent and execute one chat turn."""
         try:
-            from ..core.venv_manager import ensure_venv_packages_available
-
-            ensure_venv_packages_available()
-
             from geoagent import GeoAgentConfig
 
             try:
@@ -421,7 +420,9 @@ class ChatPanelWidget(QWidget):
         """Load persisted model settings into the dock controls."""
         provider = _setting(self.settings, "provider", "openai")
         index = self.provider_combo.findText(provider)
-        self.provider_combo.setCurrentIndex(index if index >= 0 else 1)
+        if index < 0:
+            index = self.provider_combo.findText("openai")
+        self.provider_combo.setCurrentIndex(index if index >= 0 else 0)
 
         model = _setting(self.settings, "model", "")
         if not model:
@@ -459,6 +460,18 @@ class ChatPanelWidget(QWidget):
         self._save_model_settings()
         self._record_prompt(prompt)
         _apply_environment_from_settings(self.settings)
+
+        try:
+            from ..core.venv_manager import ensure_venv_packages_available
+
+            ensure_venv_packages_available()
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "GEE Data Catalogs",
+                f"Failed to prepare AI assistant dependencies:\n{exc}",
+            )
+            return
 
         provider = self.provider_combo.currentText()
         model_id = self.model_input.text().strip()
@@ -664,14 +677,33 @@ class ChatPanelWidget(QWidget):
         except Exception:  # nosec B110
             pass
 
+    def _shutdown_worker(self):
+        """Disconnect and wait for any in-flight chat worker."""
+        worker = self._worker
+        if worker is None:
+            return
+        try:
+            worker.finished.disconnect(self._on_worker_finished)
+        except (TypeError, RuntimeError):  # nosec B110
+            pass
+        if worker.isRunning():
+            worker.quit()
+            worker.wait(5000)
+        self._worker = None
+
+    def shutdown(self):
+        """Release timers and worker resources before deletion."""
+        self._shutdown_running_state()
+        self._shutdown_worker()
+
     def hideEvent(self, event):
         """Stop the animated status timer when the dock is hidden."""
         self._shutdown_running_state()
         super().hideEvent(event)
 
     def closeEvent(self, event):
-        """Stop the animated status timer when the panel is closed."""
-        self._shutdown_running_state()
+        """Stop timers and the worker when the panel is closed."""
+        self.shutdown()
         super().closeEvent(event)
 
 
@@ -686,3 +718,13 @@ class ChatDockWidget(QDockWidget):
             Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
         )
         self.setMinimumWidth(300)
+
+    def shutdown(self):
+        """Forward shutdown to the embedded panel."""
+        if self.panel is not None:
+            self.panel.shutdown()
+
+    def closeEvent(self, event):
+        """Stop the embedded panel's worker before the dock closes."""
+        self.shutdown()
+        super().closeEvent(event)

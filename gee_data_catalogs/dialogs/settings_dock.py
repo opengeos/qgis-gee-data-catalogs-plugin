@@ -455,11 +455,14 @@ class SettingsDockWidget(QDockWidget):
             f"{self.SETTINGS_PREFIX}provider", "openai", type=str
         )
         provider_index = self.provider_combo.findText(provider)
+        if provider_index < 0:
+            provider_index = self.provider_combo.findText("openai")
         self.provider_combo.setCurrentIndex(
-            provider_index if provider_index >= 0 else 1
+            provider_index if provider_index >= 0 else 0
         )
+        effective_provider = self.provider_combo.currentText()
         model = self.settings.value(f"{self.SETTINGS_PREFIX}model", "", type=str)
-        self.model_input.setText(model or DEFAULT_MODELS.get(provider, ""))
+        self.model_input.setText(model or DEFAULT_MODELS.get(effective_provider, ""))
         self.fast_check.setChecked(
             self.settings.value(f"{self.SETTINGS_PREFIX}fast_mode", False, type=bool)
         )
