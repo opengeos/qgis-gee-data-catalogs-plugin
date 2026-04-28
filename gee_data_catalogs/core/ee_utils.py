@@ -268,6 +268,10 @@ def add_ee_layer(
         # Register the layer for Inspector (important: register before returning)
         add_ee_layer_to_registry(name, ee_object, vis_params)
 
+        # Persist EE metadata so the layer can be reconstructed on project reload.
+        if isinstance(layer, QgsRasterLayer):
+            _store_ee_layer_metadata(layer, ee_object, vis_params)
+
         return layer
     except ImportError:
         pass
@@ -380,6 +384,7 @@ def clear_ee_layer_registry():
 EE_ASSET_ID_KEY = "ee_asset_id"
 EE_VIS_PARAMS_KEY = "ee_vis_params"
 EE_OBJECT_TYPE_KEY = "ee_object_type"
+EE_SERIALIZED_KEY = "ee_serialized"
 
 
 def _store_ee_layer_metadata(
@@ -387,7 +392,11 @@ def _store_ee_layer_metadata(
 ) -> None:
     """Store Earth Engine metadata in layer custom properties.
 
-    This enables layer refresh when reopening a QGIS project.
+    This enables layer refresh when reopening a QGIS project. In addition to
+    the asset id (only present for pristine catalog assets), the full
+    Earth Engine computation graph is serialized so that derived/computed
+    objects produced from the Code tab can be reconstructed losslessly on
+    project reload.
 
     Args:
         layer: The QGIS layer to store metadata on.
@@ -429,9 +438,26 @@ def _store_ee_layer_metadata(
     if vis_params:
         layer.setCustomProperty(EE_VIS_PARAMS_KEY, json.dumps(vis_params))
 
+    # Persist the full EE computation graph so derived/computed objects (e.g.
+    # `image.normalizedDifference([...])` from the Code tab) can be restored
+    # on project reload, not just pristine catalog assets.
+    if object_type is not None:
+        try:
+            serialized = ee.serializer.toJSON(ee_object)
+            layer.setCustomProperty(EE_SERIALIZED_KEY, serialized)
+        except Exception as exc:
+            QgsMessageLog.logMessage(
+                f"Could not serialize EE object for layer '{layer.name()}': {exc}",
+                "GEE Data Catalogs",
+                Qgis.MessageLevel.Warning,
+            )
+
 
 def is_ee_layer(layer: QgsRasterLayer) -> bool:
     """Check if a layer is an Earth Engine layer.
+
+    A layer is treated as an EE layer if it carries either an asset id or
+    a serialized computation graph in its custom properties.
 
     Args:
         layer: The layer to check.
@@ -439,13 +465,20 @@ def is_ee_layer(layer: QgsRasterLayer) -> bool:
     Returns:
         True if the layer has EE metadata, False otherwise.
     """
-    return layer.customProperty(EE_ASSET_ID_KEY) is not None
+    return (
+        layer.customProperty(EE_ASSET_ID_KEY) is not None
+        or layer.customProperty(EE_SERIALIZED_KEY) is not None
+    )
 
 
 def refresh_ee_layer(layer: QgsRasterLayer) -> bool:
     """Refresh an Earth Engine layer's tile URL.
 
     Regenerates the tile URL from stored metadata and updates the layer source.
+    Reconstruction prefers the serialized computation graph (which round-trips
+    derived/computed objects like ``image.normalizedDifference([...])``) and
+    falls back to loading by asset id when only a pristine catalog asset was
+    persisted.
 
     Args:
         layer: The QGIS layer to refresh.
@@ -459,9 +492,10 @@ def refresh_ee_layer(layer: QgsRasterLayer) -> bool:
     # Get stored metadata
     asset_id = layer.customProperty(EE_ASSET_ID_KEY)
     object_type = layer.customProperty(EE_OBJECT_TYPE_KEY)
+    serialized = layer.customProperty(EE_SERIALIZED_KEY)
     vis_params_json = layer.customProperty(EE_VIS_PARAMS_KEY)
 
-    if not asset_id:
+    if not asset_id and not serialized:
         return False
 
     # Parse visualization parameters
@@ -473,8 +507,23 @@ def refresh_ee_layer(layer: QgsRasterLayer) -> bool:
             pass
 
     try:
-        # Load the EE object
-        ee_object = load_ee_asset(asset_id, object_type)
+        # Reconstruct the EE object. Prefer the serialized computation graph so
+        # derived objects survive a reload; fall back to asset-id loading.
+        ee_object = None
+        if serialized:
+            try:
+                ee_object = ee.deserializer.fromJSON(serialized)
+            except Exception as exc:
+                QgsMessageLog.logMessage(
+                    f"Failed to deserialize EE graph for '{layer.name()}', "
+                    f"falling back to asset id: {exc}",
+                    "GEE Data Catalogs",
+                    Qgis.MessageLevel.Info,
+                )
+        if ee_object is None and asset_id:
+            ee_object = load_ee_asset(asset_id, object_type)
+        if ee_object is None:
+            return False
 
         # Generate new tile URL
         if isinstance(ee_object, ee.FeatureCollection):

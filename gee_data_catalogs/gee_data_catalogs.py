@@ -480,7 +480,7 @@ class GeeDataCatalogs:
                     self.iface.messageBar().pushWarning(
                         "GEE Data Catalogs",
                         f"Found {len(ee_layers)} Earth Engine layer(s) but EE is not initialized. "
-                        "Please initialize Earth Engine to refresh the layers.",
+                        "Initialize Earth Engine to automatically restore the layers.",
                     )
                     return
 
@@ -548,6 +548,31 @@ class GeeDataCatalogs:
             if project_source:
                 success_msg += f" (using project from {project_source})"
             self.iface.messageBar().pushSuccess("GEE Data Catalogs", success_msg)
+
+            # Restore any EE layers that were waiting for EE to be initialized
+            # (e.g. project was opened before EE was authenticated this session).
+            try:
+                from .core.ee_utils import refresh_all_ee_layers
+
+                refreshed = refresh_all_ee_layers()
+                if refreshed:
+                    self.iface.messageBar().pushSuccess(
+                        "GEE Data Catalogs",
+                        f"Restored {refreshed} Earth Engine layer(s) from project.",
+                    )
+                if self._catalog_dock:
+                    if hasattr(self._catalog_dock, "_refresh_inspector_layers"):
+                        self._catalog_dock._refresh_inspector_layers()
+                    if hasattr(self._catalog_dock, "_refresh_export_layers"):
+                        self._catalog_dock._refresh_export_layers()
+            except Exception as restore_exc:
+                from qgis.core import QgsMessageLog, Qgis
+
+                QgsMessageLog.logMessage(
+                    f"Failed to restore EE layers after init: {restore_exc}",
+                    "GEE Data Catalogs",
+                    Qgis.MessageLevel.Warning,
+                )
         except ImportError as e:
             QMessageBox.critical(
                 self.iface.mainWindow(),

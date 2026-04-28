@@ -4826,8 +4826,20 @@ class CatalogDockWidget(QDockWidget):
         return widget
 
     def _refresh_export_layers(self):
-        """Refresh the list of EE layers available for export."""
-        from ..core.ee_utils import get_ee_layers
+        """Refresh the list of EE layers available for export.
+
+        When Earth Engine is initialized, also rebuild the in-memory layer
+        registry from QGIS layer custom properties so layers carried over
+        from a saved project are visible without manual re-add.
+        """
+        from ..core.ee_utils import (
+            get_ee_layers,
+            is_ee_initialized,
+            refresh_all_ee_layers,
+        )
+
+        if is_ee_initialized():
+            refresh_all_ee_layers()
 
         self.export_layer_combo.clear()
         ee_layers = get_ee_layers()
@@ -7349,8 +7361,20 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
         QMessageBox.critical(self, "Error", message)
 
     def _refresh_inspector_layers(self):
-        """Refresh the count of registered Earth Engine layers."""
-        from ..core.ee_utils import get_ee_layers
+        """Refresh the count of registered Earth Engine layers.
+
+        When Earth Engine is initialized, also rebuild the in-memory layer
+        registry from QGIS layer custom properties so layers carried over
+        from a saved project become inspectable without manual re-add.
+        """
+        from ..core.ee_utils import (
+            get_ee_layers,
+            is_ee_initialized,
+            refresh_all_ee_layers,
+        )
+
+        if is_ee_initialized():
+            refresh_all_ee_layers()
 
         ee_layers = get_ee_layers()
         count = len(ee_layers)
