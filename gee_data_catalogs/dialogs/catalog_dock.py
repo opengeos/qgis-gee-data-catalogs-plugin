@@ -85,17 +85,102 @@ class PreviewInfoThread(QThread):
     def __init__(
         self,
         asset_id: str,
+        asset_type: str = None,
         use_date_filter: bool = False,
         start_date: str = None,
         end_date: str = None,
+        bbox: list = None,
+        cloud_cover: int = None,
+        cloud_property: str = None,
+        property_filters: list = None,
         selected_images: list = None,
     ):
         super().__init__()
         self.asset_id = asset_id
+        self.asset_type = asset_type
         self.use_date_filter = use_date_filter
         self.start_date = start_date
         self.end_date = end_date
+        self.bbox = bbox
+        self.cloud_cover = cloud_cover
+        self.cloud_property = cloud_property
+        self.property_filters = property_filters or []
         self.selected_images = selected_images  # List of {"id": ..., "date": ...}
+
+    def _apply_property_filters(self, collection):
+        """Apply parsed property filters to an Earth Engine collection."""
+        import ee
+
+        for prop_name, op, value in self.property_filters:
+            if op == "==":
+                collection = collection.filter(ee.Filter.eq(prop_name, value))
+            elif op == "!=":
+                collection = collection.filter(ee.Filter.neq(prop_name, value))
+            elif op == ">":
+                collection = collection.filter(ee.Filter.gt(prop_name, value))
+            elif op == ">=":
+                collection = collection.filter(ee.Filter.gte(prop_name, value))
+            elif op == "<":
+                collection = collection.filter(ee.Filter.lt(prop_name, value))
+            elif op == "<=":
+                collection = collection.filter(ee.Filter.lte(prop_name, value))
+        return collection
+
+    def _apply_image_collection_filters(self, collection):
+        """Apply the Load tab filters used by ImageCollection Preview Info."""
+        import ee
+
+        if self.use_date_filter and self.start_date and self.end_date:
+            self.progress.emit("Applying date filter...")
+            collection = collection.filterDate(self.start_date, self.end_date)
+
+        if self.bbox:
+            self.progress.emit("Applying spatial filter...")
+            geometry = ee.Geometry.Rectangle(self.bbox, geodesic=False)
+            collection = collection.filterBounds(geometry)
+
+        if self.cloud_cover is not None and self.cloud_property:
+            self.progress.emit("Applying cloud filter...")
+            collection = collection.filter(
+                ee.Filter.lt(self.cloud_property, self.cloud_cover)
+            )
+
+        if self.property_filters:
+            self.progress.emit("Applying property filters...")
+            collection = self._apply_property_filters(collection)
+
+        return collection
+
+    def _apply_feature_collection_filters(self, collection):
+        """Apply supported Load tab filters to FeatureCollection Preview Info."""
+        import ee
+
+        if self.bbox:
+            self.progress.emit("Applying spatial filter...")
+            geometry = ee.Geometry.Rectangle(self.bbox, geodesic=False)
+            collection = collection.filterBounds(geometry)
+
+        if self.property_filters:
+            self.progress.emit("Applying property filters...")
+            collection = self._apply_property_filters(collection)
+
+        return collection
+
+    def _filter_summary(self):
+        """Return a short text summary of the filters applied to preview info."""
+        filters = []
+        if self.use_date_filter and self.start_date and self.end_date:
+            filters.append(f"Date: {self.start_date} to {self.end_date}")
+        if self.bbox:
+            west, south, east, north = self.bbox
+            filters.append(
+                "Bounds: " f"{west:.5f}, {south:.5f}, {east:.5f}, {north:.5f}"
+            )
+        if self.cloud_cover is not None and self.cloud_property:
+            filters.append(f"Cloud: {self.cloud_property} < {self.cloud_cover}")
+        if self.property_filters:
+            filters.append(f"Property filters: {len(self.property_filters)}")
+        return "\n".join(filters)
 
     def run(self):
         try:
@@ -111,10 +196,14 @@ class PreviewInfoThread(QThread):
                 # Create an ImageCollection from the selected images
                 image_ids = [img_info["id"] for img_info in self.selected_images]
                 collection = ee.ImageCollection(image_ids)
+                collection = self._apply_image_collection_filters(collection)
 
                 size = collection.size().getInfo()
                 info_text = f"Type: ImageCollection (filtered)\n"
                 info_text += f"From: {self.asset_id}\n"
+                filter_summary = self._filter_summary()
+                if filter_summary:
+                    info_text += f"Filters:\n{filter_summary}\n\n"
                 info_text += f"Size: {size} images\n\n"
 
                 # Get date range
@@ -142,12 +231,15 @@ class PreviewInfoThread(QThread):
                 self.finished.emit(info_text)
                 return
 
-            self.progress.emit(f"Detecting asset type...")
+            self.progress.emit("Detecting asset type...")
 
-            data_type = detect_asset_type(self.asset_id)
+            data_type = self.asset_type or detect_asset_type(self.asset_id)
             info_text = f"Type: {data_type}\nID: {self.asset_id}\n\n"
+            filter_summary = self._filter_summary()
+            if filter_summary:
+                info_text += f"Filters:\n{filter_summary}\n\n"
 
-            self.progress.emit(f"Getting info...")
+            self.progress.emit("Getting info...")
 
             if data_type == "Image":
                 image = ee.Image(self.asset_id)
@@ -160,13 +252,14 @@ class PreviewInfoThread(QThread):
 
             elif data_type == "ImageCollection":
                 collection = ee.ImageCollection(self.asset_id)
-                if self.use_date_filter and self.start_date and self.end_date:
-                    collection = collection.filterDate(self.start_date, self.end_date)
+                collection = self._apply_image_collection_filters(collection)
 
+                self.progress.emit("Counting filtered images...")
                 size = collection.size().getInfo()
                 info_text += f"Size: {size} images\n"
 
                 if size > 0:
+                    self.progress.emit("Getting band information...")
                     first = collection.first()
                     bands = first.bandNames().getInfo()
                     info_text += f"\nBands per image: {len(bands)}\n"
@@ -181,6 +274,8 @@ class PreviewInfoThread(QThread):
 
             elif data_type == "FeatureCollection":
                 fc = ee.FeatureCollection(self.asset_id)
+                fc = self._apply_feature_collection_filters(fc)
+                self.progress.emit("Counting filtered features...")
                 size = fc.size().getInfo()
                 info_text += f"Size: {size} features\n"
             else:
@@ -2354,15 +2449,17 @@ class InspectorMapTool:
 class CatalogDockWidget(QDockWidget):
     """Main catalog browser panel for GEE datasets."""
 
-    def __init__(self, iface, parent=None):
+    def __init__(self, iface, plugin=None, parent=None):
         """Initialize the dock widget.
 
         Args:
             iface: QGIS interface instance.
+            plugin: Main plugin instance, used by the AI assistant tools.
             parent: Parent widget.
         """
         super().__init__("GEE Data Catalogs", parent)
         self.iface = iface
+        self.plugin = plugin
         self._selected_dataset = None
         self._catalog_thread = None
         self._image_list_thread = None
@@ -2447,36 +2544,44 @@ class CatalogDockWidget(QDockWidget):
         layout.addWidget(self.tab_widget)
 
         # Browse tab
-        browse_tab = self._create_browse_tab()
-        self.tab_widget.addTab(browse_tab, "Browse")
+        self.browse_tab = self._create_browse_tab()
+        self.tab_widget.addTab(self.browse_tab, "Browse")
 
         # Search tab
-        search_tab = self._create_search_tab()
-        self.tab_widget.addTab(search_tab, "Search")
+        self.search_tab = self._create_search_tab()
+        self.tab_widget.addTab(self.search_tab, "Search")
 
         # Time Series tab
-        timeseries_tab = self._create_timeseries_tab()
-        self.tab_widget.addTab(timeseries_tab, "Time Series")
+        self.timeseries_tab = self._create_timeseries_tab()
+        self.tab_widget.addTab(self.timeseries_tab, "Time Series")
 
         # Load tab
-        load_tab = self._create_load_tab()
-        self.tab_widget.addTab(load_tab, "Load")
+        self.load_tab = self._create_load_tab()
+        self.tab_widget.addTab(self.load_tab, "Load")
 
         # Code tab
-        code_tab = self._create_code_tab()
-        self.tab_widget.addTab(code_tab, "Code")
+        self.code_tab = self._create_code_tab()
+        self.tab_widget.addTab(self.code_tab, "Code")
 
         # Conversion tab
-        conversion_tab = self._create_conversion_tab()
-        self.tab_widget.addTab(conversion_tab, "Conversion")
+        self.conversion_tab = self._create_conversion_tab()
+        self.tab_widget.addTab(self.conversion_tab, "Conversion")
 
         # Inspector tab
-        inspector_tab = self._create_inspector_tab()
-        self.tab_widget.addTab(inspector_tab, "Inspector")
+        self.inspector_tab = self._create_inspector_tab()
+        self.tab_widget.addTab(self.inspector_tab, "Inspector")
 
         # Export tab
-        export_tab = self._create_export_tab()
-        self.tab_widget.addTab(export_tab, "Export")
+        self.export_tab = self._create_export_tab()
+        self.tab_widget.addTab(self.export_tab, "Export")
+
+        # AI assistant tab
+        from .chat_dock import ChatPanelWidget
+
+        self.ai_assistant_tab = ChatPanelWidget(
+            self.iface, plugin=self.plugin, parent=self
+        )
+        self.tab_widget.addTab(self.ai_assistant_tab, "AI Assistant")
 
         # Progress bar
         self.progress_bar = QProgressBar()
@@ -3312,6 +3417,16 @@ class CatalogDockWidget(QDockWidget):
 
         slider_layout.addLayout(slider_btn_layout)
 
+        keep_layout = QHBoxLayout()
+        self.ts_keep_current_btn = QPushButton("Keep Current Layer")
+        self.ts_keep_current_btn.setEnabled(False)
+        self.ts_keep_current_btn.setToolTip(
+            "Add the currently displayed time step as a separate layer that will not be replaced by playback."
+        )
+        self.ts_keep_current_btn.clicked.connect(self._keep_current_timeseries_layer)
+        keep_layout.addWidget(self.ts_keep_current_btn)
+        slider_layout.addLayout(keep_layout)
+
         # Animation speed control
         speed_layout = QHBoxLayout()
         speed_layout.addWidget(QLabel("Speed:"))
@@ -3566,6 +3681,9 @@ class CatalogDockWidget(QDockWidget):
 
         self.dataset_id_input = QLineEdit()
         self.dataset_id_input.setPlaceholderText("e.g., LANDSAT/LC09/C02/T1_L2")
+        self.dataset_id_input.textEdited.connect(
+            self._clear_selected_dataset_if_asset_changed
+        )
         id_layout.addRow("Asset ID:", self.dataset_id_input)
 
         self.layer_name_input = QLineEdit()
@@ -5429,12 +5547,22 @@ class CatalogDockWidget(QDockWidget):
 
     def _on_tab_changed(self, index):
         """Handle tab changes."""
-        # Refresh layer count when switching to Inspector tab (index 6 after adding Time Series tab)
-        if index == 6:  # Inspector tab
+        current_widget = self.tab_widget.widget(index)
+        if current_widget == getattr(self, "inspector_tab", None):
             self._refresh_inspector_layers()
-        elif index == 7:  # Export tab
+        elif current_widget == getattr(self, "export_tab", None):
             self._refresh_export_layers()
             self._refresh_vector_layers()
+
+        plugin = getattr(self, "plugin", None)
+        if plugin is not None and hasattr(plugin, "_sync_panel_actions"):
+            plugin._sync_panel_actions()
+
+    def show_ai_assistant_tab(self):
+        """Show the AI assistant inside the main catalog panel."""
+        self.tab_widget.setCurrentWidget(self.ai_assistant_tab)
+        self.show()
+        self.raise_()
 
     def _toggle_image_selection(self, checked):
         """Toggle visibility of image selection widgets."""
@@ -5442,6 +5570,14 @@ class CatalogDockWidget(QDockWidget):
         self.fetch_images_btn.setVisible(checked)
         self.image_limit_spin.setVisible(checked)
         self.agg_method.setEnabled(not checked)
+
+    def _clear_selected_dataset_if_asset_changed(self, asset_id):
+        """Forget catalog metadata when the user edits the asset ID manually."""
+        if (
+            self._selected_dataset
+            and self._selected_dataset.get("id") != asset_id.strip()
+        ):
+            self._selected_dataset = None
 
     def _start_catalog_load(self):
         """Start loading catalogs in background."""
@@ -5781,8 +5917,7 @@ class CatalogDockWidget(QDockWidget):
             self.dataset_id_input.setText(self._selected_dataset.get("id", ""))
             self.layer_name_input.setText(self._selected_dataset.get("name", "")[:50])
 
-            # Switch to Load tab (index 3 after Time Series tab)
-            self.tab_widget.setCurrentIndex(3)
+            self.tab_widget.setCurrentWidget(self.load_tab)
 
     def _configure_timeseries(self):
         """Configure time series from the selected dataset."""
@@ -5830,8 +5965,7 @@ class CatalogDockWidget(QDockWidget):
             # Generate and copy time series Python code snippet to clipboard
             self._copy_timeseries_code_for_dataset(asset_id, name, start_date, end_date)
 
-            # Switch to Time Series tab (index 2)
-            self.tab_widget.setCurrentIndex(2)
+            self.tab_widget.setCurrentWidget(self.timeseries_tab)
 
     def _copy_timeseries_code_for_dataset(self, asset_id, name, start_date, end_date):
         """Generate and copy time series Python code snippet to clipboard."""
@@ -5931,71 +6065,30 @@ for f in data['features']:
             vis_params = dataset.get("vis_params", {})
             name = dataset.get("name", asset_id.split("/")[-1])[:50]
 
-            # Auto-detect the asset type
             from ..core.ee_utils import detect_asset_type, add_ee_layer
 
-            catalog_type = dataset.get("type", "").lower()
-
-            # Try to load based on catalog type first, then fall back to detection
+            catalog_type = self._catalog_asset_type(dataset)
             ee_object = None
-            actual_type = None
+            actual_type = catalog_type
 
-            try:
-                if catalog_type == "image":
-                    ee_object = ee.Image(asset_id)
-                    ee_object.bandNames().getInfo()  # Verify it works
-                    actual_type = "Image"
-                elif catalog_type == "imagecollection":
-                    collection = ee.ImageCollection(asset_id)
-                    collection.size().getInfo()  # Verify it works
-                    ee_object = collection.mosaic()
-                    actual_type = "ImageCollection"
-                elif catalog_type == "bigquerytable":
-                    # BigQuery tables require loadBigQueryTable()
-                    bigquery_table = dataset.get("bigquery_table", "")
-                    if bigquery_table:
-                        ee_object = ee.FeatureCollection.loadBigQueryTable(
-                            bigquery_table
-                        )
-                        ee_object.size().getInfo()  # Verify it works
-                        actual_type = "BigQueryTable"
-                    else:
-                        raise ValueError(
-                            f"BigQuery table name not found for: {asset_id}"
-                        )
-                elif catalog_type == "featurecollection" or catalog_type == "table":
-                    ee_object = ee.FeatureCollection(asset_id)
-                    ee_object.size().getInfo()  # Verify it works
-                    actual_type = "FeatureCollection"
-            except Exception as type_err:
-                # Catalog type was wrong or API call failed, auto-detect
-                QgsMessageLog.logMessage(
-                    f"Loading as {catalog_type} failed for {asset_id}: {type_err}",
-                    "GEE Data Catalogs",
-                    Qgis.MessageLevel.Warning,
-                )
-
-            # If loading based on catalog type failed, auto-detect
-            if ee_object is None:
-                # BigQuery tables cannot be auto-detected, must have bigquery_table field
-                if catalog_type == "bigquerytable":
-                    bigquery_table = dataset.get("bigquery_table", "")
-                    raise ValueError(
-                        f"Failed to load BigQuery table. Table name: {bigquery_table or 'not found'}"
-                    )
-
+            if not actual_type:
                 self._show_progress(f"Detecting asset type for {asset_id}...")
                 QCoreApplication.processEvents()
                 actual_type = detect_asset_type(asset_id)
 
-                if actual_type == "Image":
-                    ee_object = ee.Image(asset_id)
-                elif actual_type == "ImageCollection":
-                    ee_object = ee.ImageCollection(asset_id).mosaic()
-                elif actual_type == "FeatureCollection":
-                    ee_object = ee.FeatureCollection(asset_id)
-                else:
-                    raise ValueError(f"Could not determine asset type for: {asset_id}")
+            if actual_type == "Image":
+                ee_object = ee.Image(asset_id)
+            elif actual_type == "ImageCollection":
+                ee_object = ee.ImageCollection(asset_id).mosaic()
+            elif actual_type == "FeatureCollection":
+                ee_object = ee.FeatureCollection(asset_id)
+            elif actual_type == "BigQueryTable":
+                bigquery_table = dataset.get("bigquery_table", "")
+                if not bigquery_table:
+                    raise ValueError(f"BigQuery table name not found for: {asset_id}")
+                ee_object = ee.FeatureCollection.loadBigQueryTable(bigquery_table)
+            else:
+                raise ValueError(f"Could not determine asset type for: {asset_id}")
 
             # Add layer
             add_ee_layer(ee_object, vis_params, name)
@@ -6081,11 +6174,11 @@ for f in data['features']:
         if items:
             dataset = items[0].data(0, Qt.ItemDataRole.UserRole)
             if dataset:
+                self._selected_dataset = dataset
                 # Populate the load tab with dataset info
                 self.dataset_id_input.setText(dataset.get("id", ""))
                 self.layer_name_input.setText(dataset.get("name", "")[:50])
-                # Switch to Load tab (index 3 after Time Series tab)
-                self.tab_widget.setCurrentIndex(3)
+                self.tab_widget.setCurrentWidget(self.load_tab)
 
     def _configure_search_timeseries(self):
         """Configure time series from selected search result."""
@@ -6226,10 +6319,14 @@ for f in data['features']:
                 # Load as composite - auto-detect asset type
                 from ..core.ee_utils import detect_asset_type, add_ee_layer
 
-                self._show_progress(f"Detecting asset type for {asset_id}...")
-                QCoreApplication.processEvents()
-
-                asset_type = detect_asset_type(asset_id)
+                asset_type = self._selected_asset_type(asset_id)
+                if asset_type:
+                    self._show_progress(f"Loading {asset_type} {asset_id}...")
+                    QCoreApplication.processEvents()
+                else:
+                    self._show_progress(f"Detecting asset type for {asset_id}...")
+                    QCoreApplication.processEvents()
+                    asset_type = detect_asset_type(asset_id)
 
                 if asset_type == "ImageCollection":
                     ee_object = self._load_image_collection(asset_id)
@@ -6237,6 +6334,13 @@ for f in data['features']:
                     ee_object = ee.Image(asset_id)
                 elif asset_type == "FeatureCollection":
                     ee_object = ee.FeatureCollection(asset_id)
+                elif asset_type == "BigQueryTable":
+                    bigquery_table = self._selected_dataset.get("bigquery_table", "")
+                    if not bigquery_table:
+                        raise ValueError(
+                            f"BigQuery table name not found for: {asset_id}"
+                        )
+                    ee_object = ee.FeatureCollection.loadBigQueryTable(bigquery_table)
                 else:
                     # Try each type until one works
                     for loader_fn in [
@@ -6253,9 +6357,10 @@ for f in data['features']:
                         raise ValueError(f"Could not load asset: {asset_id}")
 
                 # Build vis_params based on asset type
-                is_feature_collection = asset_type == "FeatureCollection" or isinstance(
-                    ee_object, ee.FeatureCollection
-                )
+                is_feature_collection = asset_type in {
+                    "FeatureCollection",
+                    "BigQueryTable",
+                } or isinstance(ee_object, ee.FeatureCollection)
                 vis_params = self._build_vis_params(
                     for_feature_collection=is_feature_collection
                 )
@@ -6326,6 +6431,30 @@ for f in data['features']:
         self.vis_min_input.clear()
         self.vis_max_input.clear()
         self.palette_input.clear()
+
+    @staticmethod
+    def _catalog_asset_type(dataset):
+        """Return a normalized asset type from catalog metadata."""
+        if not dataset:
+            return None
+
+        catalog_type = str(dataset.get("type", "")).lower().replace("_", "")
+        catalog_type = catalog_type.replace(" ", "")
+        if catalog_type == "image":
+            return "Image"
+        if catalog_type == "imagecollection":
+            return "ImageCollection"
+        if catalog_type in {"featurecollection", "table"}:
+            return "FeatureCollection"
+        if catalog_type == "bigquerytable":
+            return "BigQueryTable"
+        return None
+
+    def _selected_asset_type(self, asset_id):
+        """Return the selected catalog asset type when it matches the load ID."""
+        if self._selected_dataset and self._selected_dataset.get("id") == asset_id:
+            return self._catalog_asset_type(self._selected_dataset)
+        return None
 
     def _build_vis_params(self, for_feature_collection: bool = False):
         """Build visualization parameters from UI inputs.
@@ -6472,10 +6601,31 @@ for f in data['features']:
         end_date = (
             self.end_date.date().toString("yyyy-MM-dd") if use_date_filter else None
         )
+        bbox = self._get_spatial_filter_load()
+        cloud_cover = (
+            self.cloud_cover_spin.value() if self.use_cloud_filter.isChecked() else None
+        )
+        cloud_property = None
+        if cloud_cover is not None:
+            custom_cloud_prop = self.cloud_property_input.text().strip()
+            cloud_property = self._get_cloud_property(asset_id, custom_cloud_prop)
+        property_filters = self._parse_property_filters(
+            self.load_property_filters.toPlainText()
+        )
+        asset_type = self._selected_asset_type(asset_id)
 
         # Start background thread
         self._preview_thread = PreviewInfoThread(
-            asset_id, use_date_filter, start_date, end_date, selected_images
+            asset_id=asset_id,
+            asset_type=asset_type,
+            use_date_filter=use_date_filter,
+            start_date=start_date,
+            end_date=end_date,
+            bbox=bbox,
+            cloud_cover=cloud_cover,
+            cloud_property=cloud_property,
+            property_filters=property_filters,
+            selected_images=selected_images,
         )
         self._preview_thread.finished.connect(self._on_preview_finished)
         self._preview_thread.error.connect(self._on_preview_error)
@@ -6733,9 +6883,7 @@ for f in data['features']:
 
         # Paste code to Code tab and switch to it
         self.code_input.setPlainText(code)
-        self.tab_widget.setCurrentIndex(
-            4
-        )  # Switch to Code tab (index 4 after Time Series tab)
+        self.tab_widget.setCurrentWidget(self.code_tab)
 
     def _run_code(self):
         """Execute the code in the console."""
@@ -7182,7 +7330,9 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)
         self.status_label.setText(message)
-        self.status_label.setStyleSheet("color: blue; font-size: 10px;")
+        self.status_label.setStyleSheet(
+            "color: #64b5f6; font-size: 10px; font-weight: bold;"
+        )
 
     def _show_success(self, message):
         """Show success message."""
@@ -7760,6 +7910,7 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
         QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
         self.ts_create_btn.setEnabled(False)
         self.ts_export_btn.setEnabled(False)
+        self.ts_keep_current_btn.setEnabled(False)
 
         try:
             start_date = self.ts_start_date.date().toString("yyyy-MM-dd")
@@ -7824,6 +7975,7 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
         except Exception as e:
             QApplication.restoreOverrideCursor()
             self.ts_create_btn.setEnabled(True)
+            self.ts_keep_current_btn.setEnabled(False)
             self._show_error(f"Failed to create time series: {str(e)}")
 
     def _on_timeseries_created(self, images_data, labels):
@@ -7906,6 +8058,7 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
             self.ts_prev_btn.setEnabled(True)
             self.ts_play_btn.setEnabled(True)
             self.ts_next_btn.setEnabled(True)
+            self.ts_keep_current_btn.setEnabled(True)
 
             # Update label
             self.ts_current_label.setText(labels[0] if labels else "No data")
@@ -7935,6 +8088,7 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
         """Handle time series creation error."""
         QApplication.restoreOverrideCursor()
         self.ts_create_btn.setEnabled(True)
+        self.ts_keep_current_btn.setEnabled(False)
         self._show_error(f"Time series error: {error}")
 
     # ==================== Time Series Export Methods ====================
@@ -8328,7 +8482,7 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
             from ..core.ee_utils import add_ee_layer
 
             image = self._timeseries_collection[index]
-            layer_name = self.ts_layer_name_input.text().strip() or "Time Series"
+            layer_name = self._timeseries_layer_base_name()
 
             # Add the layer (will replace existing layer with same name)
             add_ee_layer(image, self._timeseries_vis_params, layer_name)
@@ -8341,6 +8495,47 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
 
         except Exception as e:
             self.ts_info_label.setText(f"Error displaying image: {str(e)}")
+
+    def _timeseries_layer_base_name(self):
+        """Return the animated time series layer name."""
+        return self.ts_layer_name_input.text().strip() or "Time Series"
+
+    def _timeseries_label_for_index(self, index):
+        """Return the display label for a time series index."""
+        if 0 <= index < len(self._timeseries_labels):
+            return self._timeseries_labels[index]
+        return f"Step {index + 1}"
+
+    def _unique_qgis_layer_name(self, base_name):
+        """Return a QGIS layer name that does not already exist."""
+        name = base_name
+        suffix = 2
+        while QgsProject.instance().mapLayersByName(name):
+            name = f"{base_name} ({suffix})"
+            suffix += 1
+        return name
+
+    def _keep_current_timeseries_layer(self):
+        """Add the current time step as a persistent layer."""
+        if not self._timeseries_collection:
+            return
+
+        index = self.ts_time_slider.value()
+        if index < 0 or index >= len(self._timeseries_collection):
+            return
+
+        try:
+            from ..core.ee_utils import add_ee_layer
+
+            image = self._timeseries_collection[index]
+            label = self._timeseries_label_for_index(index)
+            base_name = self._timeseries_layer_base_name()
+            layer_name = self._unique_qgis_layer_name(f"{base_name} - {label}")
+
+            add_ee_layer(image, self._timeseries_vis_params, layer_name)
+            self.ts_info_label.setText(f"Kept current time step as layer: {layer_name}")
+        except Exception as e:
+            self.ts_info_label.setText(f"Error keeping current layer: {str(e)}")
 
     def _on_timeslider_changed(self, value):
         """Handle time slider value changed."""
@@ -8709,7 +8904,7 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
 
         # Paste code to Code tab and switch to it
         self.code_input.setPlainText(code)
-        self.tab_widget.setCurrentIndex(4)  # Code tab
+        self.tab_widget.setCurrentWidget(self.code_tab)
 
     def closeEvent(self, event):
         """Handle dock widget close event."""
@@ -8742,4 +8937,10 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
         if self._timeseries_thread and self._timeseries_thread.isRunning():
             self._timeseries_thread.terminate()
             self._timeseries_thread.wait()
+
+        # Stop and wait for the AI assistant chat worker before deletion
+        ai_tab = getattr(self, "ai_assistant_tab", None)
+        if ai_tab is not None and hasattr(ai_tab, "shutdown"):
+            ai_tab.shutdown()
+
         event.accept()
