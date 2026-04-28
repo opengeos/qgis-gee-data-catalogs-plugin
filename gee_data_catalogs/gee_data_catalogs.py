@@ -551,8 +551,12 @@ class GeeDataCatalogs:
 
             # Restore any EE layers that were waiting for EE to be initialized
             # (e.g. project was opened before EE was authenticated this session).
+            # `refresh_all_ee_layers` regenerates tile URLs and registers each
+            # reconstructed EE object in the registry as a side effect. The
+            # dock UI is then re-rendered directly from the populated registry
+            # to avoid a redundant project-wide rebuild pass.
             try:
-                from .core.ee_utils import refresh_all_ee_layers
+                from .core.ee_utils import get_ee_layers, refresh_all_ee_layers
 
                 refreshed = refresh_all_ee_layers()
                 if refreshed:
@@ -560,11 +564,11 @@ class GeeDataCatalogs:
                         "GEE Data Catalogs",
                         f"Restored {refreshed} Earth Engine layer(s) from project.",
                     )
-                if self._catalog_dock:
-                    if hasattr(self._catalog_dock, "_refresh_inspector_layers"):
-                        self._catalog_dock._refresh_inspector_layers()
-                    if hasattr(self._catalog_dock, "_refresh_export_layers"):
-                        self._catalog_dock._refresh_export_layers()
+                if self._catalog_dock and get_ee_layers():
+                    if hasattr(self._catalog_dock, "_render_inspector_from_registry"):
+                        self._catalog_dock._render_inspector_from_registry()
+                    if hasattr(self._catalog_dock, "_render_export_from_registry"):
+                        self._catalog_dock._render_export_from_registry()
             except Exception as restore_exc:
                 from qgis.core import QgsMessageLog, Qgis
 

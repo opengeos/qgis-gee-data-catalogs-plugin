@@ -525,6 +525,12 @@ def refresh_ee_layer(layer: QgsRasterLayer) -> bool:
         if ee_object is None:
             return False
 
+        # Register in the Inspector registry as soon as reconstruction succeeds.
+        # Tile-URL regeneration below is best-effort and may fail on transient
+        # EE/network issues; the registry must still reflect the live EE
+        # object so Export/Inspector remain functional.
+        add_ee_layer_to_registry(layer.name(), ee_object, vis_params)
+
         # Generate new tile URL
         if isinstance(ee_object, ee.FeatureCollection):
             # Handle FeatureCollection styling
@@ -551,9 +557,6 @@ def refresh_ee_layer(layer: QgsRasterLayer) -> bool:
         # Update layer source
         new_uri = f"type=xyz&url={tile_url}&zmax=24&zmin=0"
         layer.setDataSource(new_uri, layer.name(), "wms")
-
-        # Re-register in the Inspector registry
-        add_ee_layer_to_registry(layer.name(), ee_object, vis_params)
 
         QgsMessageLog.logMessage(
             f"Refreshed EE layer: {layer.name()}",
@@ -589,6 +592,72 @@ def refresh_all_ee_layers() -> int:
                 refreshed_count += 1
 
     return refreshed_count
+
+
+def rebuild_ee_layer_registry() -> int:
+    """Rebuild the in-memory EE layer registry from QGIS layer custom properties.
+
+    This is a lightweight counterpart to :func:`refresh_all_ee_layers`: it
+    reconstructs ``ee.Image`` / ``ee.ImageCollection`` / ``ee.FeatureCollection``
+    objects from the metadata stored on each ``QgsRasterLayer`` (via
+    ``ee.deserializer.fromJSON`` or the asset-id constructor) and registers them
+    so the Export/Inspector tabs can find them. It does **not** regenerate tile
+    URLs or call ``getMapId``, so it is safe to invoke from UI handlers like
+    tab-change or refresh-button click without triggering network requests.
+
+    Returns:
+        Number of layers added to the registry.
+    """
+    if ee is None:
+        return 0
+
+    project = QgsProject.instance()
+    rebuilt_count = 0
+
+    for layer in project.mapLayers().values():
+        if not (isinstance(layer, QgsRasterLayer) and is_ee_layer(layer)):
+            continue
+
+        asset_id = layer.customProperty(EE_ASSET_ID_KEY)
+        object_type = layer.customProperty(EE_OBJECT_TYPE_KEY)
+        serialized = layer.customProperty(EE_SERIALIZED_KEY)
+        vis_params_json = layer.customProperty(EE_VIS_PARAMS_KEY)
+
+        vis_params: Dict = {}
+        if vis_params_json:
+            try:
+                vis_params = json.loads(vis_params_json)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        ee_object = None
+        if serialized:
+            try:
+                ee_object = ee.deserializer.fromJSON(serialized)
+            except Exception as exc:
+                QgsMessageLog.logMessage(
+                    f"Failed to deserialize EE graph for '{layer.name()}', "
+                    f"falling back to asset id: {exc}",
+                    "GEE Data Catalogs",
+                    Qgis.MessageLevel.Info,
+                )
+        if ee_object is None and asset_id:
+            try:
+                ee_object = load_ee_asset(asset_id, object_type)
+            except Exception as exc:
+                QgsMessageLog.logMessage(
+                    f"Could not reconstruct EE object for '{layer.name()}': {exc}",
+                    "GEE Data Catalogs",
+                    Qgis.MessageLevel.Warning,
+                )
+                continue
+        if ee_object is None:
+            continue
+
+        add_ee_layer_to_registry(layer.name(), ee_object, vis_params)
+        rebuilt_count += 1
+
+    return rebuilt_count
 
 
 def detect_asset_type(asset_id: str) -> str:

@@ -4828,18 +4828,28 @@ class CatalogDockWidget(QDockWidget):
     def _refresh_export_layers(self):
         """Refresh the list of EE layers available for export.
 
-        When Earth Engine is initialized, also rebuild the in-memory layer
-        registry from QGIS layer custom properties so layers carried over
-        from a saved project are visible without manual re-add.
+        Rebuilds the in-memory registry from QGIS layer custom properties so
+        layers carried over from a saved project become visible without manual
+        re-add, then re-renders the dropdown. The rebuild is cheap (no
+        ``getMapId`` / network calls) and is therefore safe to invoke from UI
+        flows like tab change or refresh button click. Tile URLs are refreshed
+        elsewhere (project read, post manual EE init).
         """
-        from ..core.ee_utils import (
-            get_ee_layers,
-            is_ee_initialized,
-            refresh_all_ee_layers,
-        )
+        from ..core.ee_utils import is_ee_initialized, rebuild_ee_layer_registry
 
         if is_ee_initialized():
-            refresh_all_ee_layers()
+            rebuild_ee_layer_registry()
+
+        self._render_export_from_registry()
+
+    def _render_export_from_registry(self):
+        """Re-render the Export-tab layer dropdown from the current registry.
+
+        Lightweight UI-only update with no rebuild and no network calls. Use
+        when callers have already populated the registry and just need the
+        dropdown refreshed.
+        """
+        from ..core.ee_utils import get_ee_layers
 
         self.export_layer_combo.clear()
         ee_layers = get_ee_layers()
@@ -7363,18 +7373,28 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
     def _refresh_inspector_layers(self):
         """Refresh the count of registered Earth Engine layers.
 
-        When Earth Engine is initialized, also rebuild the in-memory layer
-        registry from QGIS layer custom properties so layers carried over
-        from a saved project become inspectable without manual re-add.
+        Rebuilds the in-memory registry from QGIS layer custom properties so
+        layers carried over from a saved project become inspectable without
+        manual re-add, then re-renders the Inspector status label. The rebuild
+        is cheap (no ``getMapId`` / network calls) and is therefore safe to
+        invoke from UI flows like Inspector toggle or refresh button click.
+        Tile URLs are refreshed elsewhere (project read, post manual EE init).
         """
-        from ..core.ee_utils import (
-            get_ee_layers,
-            is_ee_initialized,
-            refresh_all_ee_layers,
-        )
+        from ..core.ee_utils import is_ee_initialized, rebuild_ee_layer_registry
 
         if is_ee_initialized():
-            refresh_all_ee_layers()
+            rebuild_ee_layer_registry()
+
+        self._render_inspector_from_registry()
+
+    def _render_inspector_from_registry(self):
+        """Re-render the Inspector layer-count label from the current registry.
+
+        Lightweight UI-only update with no rebuild and no network calls. Use
+        when callers have already populated the registry and just need the
+        label refreshed.
+        """
+        from ..core.ee_utils import get_ee_layers
 
         ee_layers = get_ee_layers()
         count = len(ee_layers)
