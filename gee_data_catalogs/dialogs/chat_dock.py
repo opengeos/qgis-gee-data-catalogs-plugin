@@ -36,6 +36,8 @@ DEFAULT_MODELS = {
     "litellm": "openai/gpt-5.5",
 }
 PROVIDERS = ["bedrock", "openai", "anthropic", "gemini", "ollama", "litellm"]
+MAX_CONTEXT_MESSAGES = 12
+MAX_CONTEXT_CHARS = 12000
 SAMPLE_PROMPTS = [
     "Search the Earth Engine catalog for recent Sentinel-2 surface reflectance datasets.",
     "Find GEE datasets for flood mapping and tell me which one to load.",
@@ -225,6 +227,10 @@ class ChatWorker(QThread):
         self.fast = fast
         self.max_tokens = max_tokens
 
+    def _confirm_tool(self, request):
+        """Allow confirmation-required tools to run without a modal prompt."""
+        return True
+
     def run(self):
         """Create a GeoAgent GEE Data Catalogs agent and execute one chat turn."""
         try:
@@ -256,6 +262,7 @@ class ChatWorker(QThread):
                     plugin=self.plugin,
                     config=config,
                     fast=self.fast,
+                    confirm=self._confirm_tool,
                 )
             except ImportError:
                 from geoagent import for_qgis
@@ -265,7 +272,7 @@ class ChatWorker(QThread):
                     from geoagent.tools.gee_data_catalogs import gee_data_catalogs_tools
 
                     extra_tools = gee_data_catalogs_tools(
-                        self.iface, project=project, plugin=self.plugin
+                        self.iface, plugin=self.plugin
                     )
                 except Exception:
                     extra_tools = []
@@ -275,6 +282,7 @@ class ChatWorker(QThread):
                     config=config,
                     fast=self.fast,
                     extra_tools=extra_tools,
+                    confirm=self._confirm_tool,
                 )
 
             response = agent.chat(self.prompt)
@@ -301,11 +309,11 @@ class ChatWorker(QThread):
             )
 
 
-class ChatDockWidget(QDockWidget):
-    """Dock widget that sends user prompts to a GeoAgent catalog agent."""
+class ChatPanelWidget(QWidget):
+    """Widget that sends user prompts to a GeoAgent catalog agent."""
 
     def __init__(self, iface, plugin=None, parent=None):
-        super().__init__("GEE Data Catalogs AI Assistant", parent)
+        super().__init__(parent)
         self.iface = iface
         self.plugin = plugin
         self.settings = QSettings()
@@ -321,19 +329,14 @@ class ChatDockWidget(QDockWidget):
         self._status_timer.setInterval(500)
         self._status_timer.timeout.connect(self._update_running_status)
 
-        self.setAllowedAreas(
-            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
-        )
         self.setMinimumWidth(300)
 
         self._setup_ui()
         self._load_settings()
 
     def _setup_ui(self):
-        """Build the chat dock widgets and signal connections."""
-        main_widget = QWidget()
-        self.setWidget(main_widget)
-        layout = QVBoxLayout(main_widget)
+        """Build the chat widgets and signal connections."""
+        layout = QVBoxLayout(self)
         layout.setSpacing(8)
 
         model_group = QGroupBox("Model")
@@ -461,6 +464,7 @@ class ChatDockWidget(QDockWidget):
         model_id = self.model_input.text().strip()
         fast = self.fast_check.isChecked()
         max_tokens = self.settings.value(f"{SETTINGS_PREFIX}max_tokens", 4096, type=int)
+        prompt_with_context = self._build_prompt_with_context(prompt)
 
         self._append_message("You", prompt, markdown=False)
         self.prompt_input.clear()
@@ -471,7 +475,7 @@ class ChatDockWidget(QDockWidget):
         self._worker = ChatWorker(
             self.iface,
             self.plugin,
-            prompt,
+            prompt_with_context,
             provider,
             model_id,
             fast,
@@ -480,6 +484,34 @@ class ChatDockWidget(QDockWidget):
         )
         self._worker.finished.connect(self._on_worker_finished)
         self._worker.start()
+
+    def _build_prompt_with_context(self, prompt):
+        """Include recent chat transcript so follow-up turns have context."""
+        if not self._messages:
+            return prompt
+
+        history_lines = []
+        for msg in self._messages[-MAX_CONTEXT_MESSAGES:]:
+            body = msg.get("body", "").strip()
+            if not body:
+                continue
+            role = "User" if msg.get("sender") == "You" else "Assistant"
+            history_lines.append(f"{role}: {body}")
+
+        if not history_lines:
+            return prompt
+
+        history = "\n\n".join(history_lines)
+        if len(history) > MAX_CONTEXT_CHARS:
+            history = history[-MAX_CONTEXT_CHARS:]
+            history = f"[Earlier history truncated]\n{history}"
+
+        return (
+            "Use the recent conversation history for context. The current user "
+            "request is the authoritative request to answer now.\n\n"
+            f"Recent conversation:\n{history}\n\n"
+            f"Current user request:\n{prompt}"
+        )
 
     def _select_sample_prompt(self, prompt):
         """Copy the selected sample prompt into the editor."""
@@ -638,6 +670,19 @@ class ChatDockWidget(QDockWidget):
         super().hideEvent(event)
 
     def closeEvent(self, event):
-        """Stop the animated status timer when the dock is closed."""
+        """Stop the animated status timer when the panel is closed."""
         self._shutdown_running_state()
         super().closeEvent(event)
+
+
+class ChatDockWidget(QDockWidget):
+    """Dock wrapper for the GeoAgent chat panel."""
+
+    def __init__(self, iface, plugin=None, parent=None):
+        super().__init__("GEE Data Catalogs AI Assistant", parent)
+        self.panel = ChatPanelWidget(iface, plugin=plugin, parent=self)
+        self.setWidget(self.panel)
+        self.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        self.setMinimumWidth(300)

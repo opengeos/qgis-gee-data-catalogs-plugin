@@ -27,6 +27,23 @@ _ee_initialized = False
 _ee_layer_registry = {}
 
 
+def _normalize_ee_asset_type(asset_type: str) -> str:
+    """Normalize Earth Engine asset type names from catalog/API metadata."""
+    normalized = str(asset_type or "").lower().replace("_", "").replace(" ", "")
+    if normalized in {"image", "eeimage"}:
+        return "Image"
+    if normalized in {"imagecollection", "eeimagecollection"}:
+        return "ImageCollection"
+    if normalized in {
+        "featurecollection",
+        "table",
+        "eefeaturecollection",
+        "bigquerytable",
+    }:
+        return "FeatureCollection"
+    return "Unknown"
+
+
 def is_ee_initialized() -> bool:
     """Check if Earth Engine has been initialized."""
     global _ee_initialized
@@ -536,6 +553,20 @@ def detect_asset_type(asset_id: str) -> str:
     """
     if ee is None:
         raise ImportError("Earth Engine API not available")
+
+    # Prefer asset metadata. It is much cheaper than evaluating Image/
+    # ImageCollection objects with getInfo(), and avoids long UI stalls.
+    try:
+        asset_info = ee.data.getAsset(asset_id)
+        metadata_type = _normalize_ee_asset_type(asset_info.get("type"))
+        if metadata_type != "Unknown":
+            return metadata_type
+    except Exception as metadata_err:
+        QgsMessageLog.logMessage(
+            f"Asset metadata lookup failed for {asset_id}: {metadata_err}",
+            "GEE Data Catalogs",
+            Qgis.MessageLevel.Info,
+        )
 
     # Try Image first
     try:

@@ -30,7 +30,6 @@ class GeeDataCatalogs:
 
         # Dock widgets (lazy loaded)
         self._catalog_dock = None
-        self._chat_dock = None
         self._settings_dock = None
         self._deps_dock = None
 
@@ -109,6 +108,10 @@ class GeeDataCatalogs:
         if not os.path.exists(settings_icon):
             settings_icon = ":/images/themes/default/mActionOptions.svg"
 
+        robot_icon = os.path.join(icon_base, "robot.svg")
+        if not os.path.exists(robot_icon):
+            robot_icon = main_icon
+
         about_icon = os.path.join(icon_base, "about.svg")
         if not os.path.exists(about_icon):
             about_icon = ":/images/themes/default/mActionHelpContents.svg"
@@ -138,10 +141,10 @@ class GeeDataCatalogs:
         )
 
         self.chat_action = self.add_action(
-            main_icon,
+            robot_icon,
             "AI Assistant",
             self.toggle_chat_dock,
-            status_tip="Open the GEE Data Catalogs AI assistant",
+            status_tip="Open the AI Assistant tab in the GEE Data Catalogs panel",
             checkable=True,
             parent=self.iface.mainWindow(),
         )
@@ -205,11 +208,6 @@ class GeeDataCatalogs:
             self.iface.removeDockWidget(self._catalog_dock)
             self._catalog_dock.deleteLater()
             self._catalog_dock = None
-
-        if self._chat_dock:
-            self.iface.removeDockWidget(self._chat_dock)
-            self._chat_dock.deleteLater()
-            self._chat_dock = None
 
         if self._settings_dock:
             self.iface.removeDockWidget(self._settings_dock)
@@ -580,7 +578,9 @@ class GeeDataCatalogs:
         try:
             from .dialogs.catalog_dock import CatalogDockWidget
 
-            self._catalog_dock = CatalogDockWidget(self.iface, self.iface.mainWindow())
+            self._catalog_dock = CatalogDockWidget(
+                self.iface, plugin=self, parent=self.iface.mainWindow()
+            )
             self._catalog_dock.setObjectName("GeeDataCatalogsDock")
             self._catalog_dock.visibilityChanged.connect(
                 self._on_catalog_visibility_changed
@@ -600,46 +600,53 @@ class GeeDataCatalogs:
 
     def _on_catalog_visibility_changed(self, visible):
         """Handle Catalog dock visibility change."""
-        self.catalog_action.setChecked(visible)
+        self._sync_panel_actions()
 
     def toggle_chat_dock(self):
-        """Toggle the AI assistant dock widget visibility."""
-        if self._chat_dock is not None:
-            if self._chat_dock.isVisible():
-                self._chat_dock.hide()
-            else:
-                self._chat_dock.show()
-                self._chat_dock.raise_()
+        """Toggle the AI assistant tab in the main Catalog panel."""
+        if self._catalog_dock is not None and self._catalog_dock.isVisible():
+            current_tab = self._catalog_dock.tab_widget.currentWidget()
+            if current_tab == self._catalog_dock.ai_assistant_tab:
+                self._catalog_dock.hide()
+                return
+            self._catalog_dock.show_ai_assistant_tab()
+            self._sync_panel_actions()
             return
 
-        self._ensure_dependencies(self._create_chat_dock)
+        self._ensure_dependencies(self._show_ai_assistant_tab)
+
+    def _show_ai_assistant_tab(self):
+        """Create/show the main panel and switch to the AI assistant tab."""
+        if self._catalog_dock is None:
+            self._create_catalog_dock()
+        if self._catalog_dock is not None:
+            self._catalog_dock.show_ai_assistant_tab()
+        self._sync_panel_actions()
 
     def _create_chat_dock(self):
-        """Create and show the AI assistant dock after dependencies are ready."""
-        try:
-            from .dialogs.chat_dock import ChatDockWidget
-
-            self._chat_dock = ChatDockWidget(
-                self.iface, plugin=self, parent=self.iface.mainWindow()
-            )
-            self._chat_dock.setObjectName("GeeDataCatalogsChatDock")
-            self._chat_dock.visibilityChanged.connect(self._on_chat_visibility_changed)
-            self.iface.addDockWidget(
-                Qt.DockWidgetArea.RightDockWidgetArea, self._chat_dock
-            )
-            self._chat_dock.show()
-            self._chat_dock.raise_()
-        except Exception as e:
-            QMessageBox.critical(
-                self.iface.mainWindow(),
-                "Error",
-                f"Failed to create AI assistant panel:\n{str(e)}",
-            )
-            self.chat_action.setChecked(False)
+        """Backward-compatible entry point for opening the assistant tab."""
+        self._show_ai_assistant_tab()
 
     def _on_chat_visibility_changed(self, visible):
         """Handle AI assistant dock visibility change."""
-        self.chat_action.setChecked(visible)
+        self._sync_panel_actions()
+
+    def _sync_panel_actions(self):
+        """Synchronize toolbar/menu check states with the merged main panel."""
+        catalog_visible = bool(
+            self._catalog_dock is not None and self._catalog_dock.isVisible()
+        )
+        if hasattr(self, "catalog_action"):
+            self.catalog_action.setChecked(catalog_visible)
+
+        assistant_visible = False
+        if catalog_visible and hasattr(self._catalog_dock, "ai_assistant_tab"):
+            assistant_visible = (
+                self._catalog_dock.tab_widget.currentWidget()
+                == self._catalog_dock.ai_assistant_tab
+            )
+        if hasattr(self, "chat_action"):
+            self.chat_action.setChecked(assistant_visible)
 
     def toggle_settings_dock(self):
         """Toggle the Settings dock widget visibility (with dependency gate)."""
