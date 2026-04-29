@@ -239,7 +239,7 @@ def _extract_earth_engine_snippets(value):
             for parser in (json.loads, ast.literal_eval):
                 try:
                     parsed = parser(text)
-                except Exception:
+                except Exception:  # nosec B112
                     continue
                 _walk(parsed)
                 return
