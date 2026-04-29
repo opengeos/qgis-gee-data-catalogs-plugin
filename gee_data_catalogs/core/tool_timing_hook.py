@@ -18,13 +18,28 @@ import time
 from typing import Any, Dict, List, Optional
 
 from qgis.core import Qgis, QgsMessageLog
-from strands.hooks import HookProvider, HookRegistry
-from strands.hooks.events import (
-    AfterModelCallEvent,
-    AfterToolCallEvent,
-    BeforeModelCallEvent,
-    BeforeToolCallEvent,
-)
+
+try:
+    from strands.hooks import HookProvider, HookRegistry
+    from strands.hooks.events import (
+        AfterModelCallEvent,
+        AfterToolCallEvent,
+        BeforeModelCallEvent,
+        BeforeToolCallEvent,
+    )
+except ImportError:  # pragma: no cover
+    # Strands is an AI Assistant runtime dependency, not a hard plugin
+    # dependency. Fall back to stubs so this module still imports cleanly
+    # under environments without Strands (e.g. the PyQt6 import-smoke CI
+    # job, or QGIS sessions where the user has not installed GeoAgent).
+    # ``register_hooks`` is only invoked when a real Strands agent is
+    # present, so the stub event sentinels are never actually consumed.
+    HookProvider = object  # type: ignore[assignment,misc]
+    HookRegistry = Any  # type: ignore[assignment,misc]
+    AfterModelCallEvent = Any  # type: ignore[assignment,misc]
+    AfterToolCallEvent = Any  # type: ignore[assignment,misc]
+    BeforeModelCallEvent = Any  # type: ignore[assignment,misc]
+    BeforeToolCallEvent = Any  # type: ignore[assignment,misc]
 
 PLUGIN_NAME = "GEE Data Catalogs"
 
