@@ -249,6 +249,41 @@ def _extract_earth_engine_snippets(value):
     return snippets
 
 
+def _format_tool_confirmation_details(tool_name, args):
+    """Return readable confirmation details for a GeoAgent tool request."""
+    args = args if isinstance(args, dict) else {}
+    if tool_name == "run_gee_python_snippet" and "code" in args:
+        lines = []
+        description = str(args.get("description") or "").strip()
+        if description:
+            lines.append(f"description: {description}")
+            lines.append("")
+
+        for key, value in args.items():
+            if key in {"code", "description"}:
+                continue
+            text = str(value)
+            if len(text) > 160:
+                text = text[:157] + "..."
+            lines.append(f"{key}: {text}")
+
+        code = str(args.get("code") or "")
+        if len(code) > 6000:
+            code = code[:6000] + "\n... [truncated]"
+        if lines:
+            lines.append("")
+        lines.extend(["code:", code])
+        return "\n".join(lines)
+
+    arg_lines = []
+    for key, value in args.items():
+        text = str(value)
+        if len(text) > 160:
+            text = text[:157] + "..."
+        arg_lines.append(f"{key}: {text}")
+    return "\n".join(arg_lines) if arg_lines else "No arguments"
+
+
 class PromptTextEdit(QPlainTextEdit):
     """Prompt editor with chat-friendly keyboard shortcuts."""
 
@@ -310,6 +345,8 @@ class ChatWorker(QThread):
 
     def _confirm_tool(self, request):
         """Ask the QGIS user before running confirmation-required tools."""
+        if self.isInterruptionRequested():
+            return False
         if self.auto_approve_tools:
             return True
 
@@ -326,14 +363,10 @@ class ChatWorker(QThread):
                     Qgis.Warning,
                 )
 
-            arg_lines = []
-            for key, value in request.args.items():
-                text = str(value)
-                if len(text) > 160:
-                    text = text[:157] + "..."
-                arg_lines.append(f"{key}: {text}")
-
-            details = "\n".join(arg_lines) if arg_lines else "No arguments"
+            details = _format_tool_confirmation_details(
+                request.tool_name,
+                request.args,
+            )
             message = (
                 f"GeoAgent wants to run:\n\n{request.tool_name}\n\n"
                 f"{details}\n\nAllow this action?"
@@ -403,6 +436,20 @@ class ChatWorker(QThread):
             snippets = _extract_earth_engine_snippets(response.tool_calls)
             if not snippets:
                 snippets = _extract_python_code_blocks(response.answer_text or "")
+            if self.isInterruptionRequested():
+                self.finished.emit(
+                    {
+                        "success": False,
+                        "answer": "",
+                        "error": "",
+                        "tools": ", ".join(response.executed_tools or []),
+                        "cancelled": ", ".join(response.cancelled_tools or []),
+                        "elapsed": f"{response.execution_time:.2f}s",
+                        "snippets": [],
+                        "cancelled_by_user": True,
+                    }
+                )
+                return
             self.finished.emit(
                 {
                     "success": bool(response.success),
@@ -412,6 +459,7 @@ class ChatWorker(QThread):
                     "cancelled": ", ".join(response.cancelled_tools or []),
                     "elapsed": f"{response.execution_time:.2f}s",
                     "snippets": snippets,
+                    "cancelled_by_user": False,
                 }
             )
         except Exception as exc:
@@ -423,6 +471,7 @@ class ChatWorker(QThread):
                     "tools": "",
                     "cancelled": "",
                     "elapsed": "",
+                    "cancelled_by_user": self.isInterruptionRequested(),
                 }
             )
 
@@ -527,6 +576,11 @@ class ChatPanelWidget(QWidget):
         self.send_btn = QPushButton("Send")
         self.send_btn.clicked.connect(self._send_prompt)
         button_layout.addWidget(self.send_btn)
+
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.clicked.connect(self._cancel_running_task)
+        button_layout.addWidget(self.cancel_btn)
 
         self.clear_btn = QPushButton("Clear")
         self.clear_btn.clicked.connect(self._clear_transcript)
@@ -644,6 +698,7 @@ class ChatPanelWidget(QWidget):
         self.status_label.setStyleSheet("color: #1976D2; font-size: 10px;")
         self._start_running_status("Running GeoAgent")
         self.send_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(True)
 
         self._worker = ChatWorker(
             self.iface,
@@ -727,7 +782,13 @@ class ChatPanelWidget(QWidget):
     def _on_worker_finished(self, result):
         """Render the completed chat worker result."""
         self._stop_running_status()
-        if result.get("success"):
+        if result.get("cancelled_by_user"):
+            self._latest_snippet = ""
+            self.copy_snippet_btn.setEnabled(False)
+            self._append_message("GeoAgent", "Cancelled by user.", markdown=False)
+            self.status_label.setText("Cancelled")
+            self.status_label.setStyleSheet("color: gray; font-size: 10px;")
+        elif result.get("success"):
             answer = result.get("answer") or "(No text response.)"
             snippets = result.get("snippets") or []
             if snippets:
@@ -758,7 +819,21 @@ class ChatPanelWidget(QWidget):
             self.status_label.setStyleSheet("color: red; font-size: 10px;")
 
         self.send_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(False)
         self._worker = None
+
+    def _cancel_running_task(self):
+        """Request cancellation of the in-flight chat worker."""
+        worker = self._worker
+        if worker is None:
+            return
+        worker.requestInterruption()
+        self.cancel_btn.setEnabled(False)
+        self.status_label.setText(
+            "Cancellation requested. Waiting for current call to stop."
+        )
+        self.status_label.setStyleSheet("color: #EF6C00; font-size: 10px;")
+        self._start_running_status("Cancelling GeoAgent")
 
     def _start_running_status(self, base_text):
         """Start or update the animated status text."""
