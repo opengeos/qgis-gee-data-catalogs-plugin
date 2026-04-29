@@ -456,7 +456,7 @@ class ChatWorker(QThread):
                 QgsMessageLog.logMessage(
                     f"Could not attach tool timing hook: {exc}",
                     "GEE Data Catalogs",
-                    Qgis.Warning,
+                    Qgis.MessageLevel.Warning,
                 )
 
             response = agent.chat(self.prompt)
@@ -566,6 +566,12 @@ class ChatPanelWidget(QWidget):
         self.show_timing_check = QCheckBox("Per-step timing")
         self.show_timing_check.setToolTip(
             "Show per-tool and per-LLM-call elapsed times beneath each reply."
+        )
+        # Persist immediately on toggle so the preference survives a QGIS
+        # restart even if the user closes the dock without sending another
+        # prompt (otherwise it would only save inside ``_send_prompt``).
+        self.show_timing_check.toggled.connect(
+            lambda _checked: self._save_model_settings()
         )
         mode_layout = QHBoxLayout()
         mode_layout.addWidget(self.fast_check)

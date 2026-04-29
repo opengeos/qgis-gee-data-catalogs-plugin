@@ -28,7 +28,7 @@ _ee_initialized = False
 # Global registry to track EE layers for Inspector
 _ee_layer_registry = {}
 
-# Identifier the earthengine-api sends to Earth Engine on every API call
+# Identifier that the earthengine-api sends to Earth Engine on every API call
 # (getMapId, getInfo, etc.). The official QGIS GEE plugin does the same so EE
 # can attribute traffic and apply the right per-client quotas. This does not
 # affect tile fetches (those go through QGIS's network manager), only the
