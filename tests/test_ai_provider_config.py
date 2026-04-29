@@ -1,6 +1,7 @@
 import sys
 import types
 
+from gee_data_catalogs.core import venv_manager
 from gee_data_catalogs.dialogs import chat_dock, settings_dock
 
 
@@ -71,6 +72,33 @@ def test_extract_python_code_block_fallback():
     ]
 
 
+def test_generated_gee_snippet_confirmation_keeps_readable_code():
+    code = "\n".join(
+        [
+            "import ee",
+            "dem = get_ee_layer('SRTM DEM clipped to United States')",
+            "hillshade = ee.Terrain.hillshade(dem)",
+            "m.add_layer(hillshade, {'min': 0, 'max': 255}, 'SRTM Hillshade')",
+        ]
+    )
+    details = chat_dock._format_tool_confirmation_details(
+        "run_gee_python_snippet",
+        {
+            "description": "Create a true hillshade from the existing DEM.",
+            "code": code,
+        },
+    )
+
+    assert "Create a true hillshade" in details
+    assert "ee.Terrain.hillshade(dem)" in details
+    assert "'SRTM Hillshade'" in details
+    assert "... [truncated]" not in details
+
+
+def test_geoagent_dependency_requires_generated_snippet_tool_version():
+    assert ("GeoAgent", "[providers]>=1.1.1") in venv_manager.REQUIRED_PACKAGES
+
+
 def test_credential_value_prefers_saved_setting_over_environment(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "env-key")
     harness = _CredentialHarness({"GeeDataCatalogs/openai_api_key": "saved-key"})
@@ -109,6 +137,21 @@ def test_confirm_tool_auto_approve_bypasses_confirmation(monkeypatch):
     )
 
     assert worker._confirm_tool(types.SimpleNamespace(args={}, tool_name="tool"))
+
+
+def test_confirm_tool_cancellation_overrides_auto_approve(monkeypatch):
+    class _MessageBox:
+        @staticmethod
+        def question(*_args, **_kwargs):
+            raise AssertionError("confirmation dialog should not open")
+
+    monkeypatch.setattr(chat_dock, "QMessageBox", _MessageBox)
+    worker = chat_dock.ChatWorker(
+        None, None, "prompt", "openai", "gpt-5.5", False, 4096, True
+    )
+    monkeypatch.setattr(worker, "isInterruptionRequested", lambda: True)
+
+    assert not worker._confirm_tool(types.SimpleNamespace(args={}, tool_name="tool"))
 
 
 def test_confirm_tool_uses_confirmation_when_auto_approve_is_off(monkeypatch):
