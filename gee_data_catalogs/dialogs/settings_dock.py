@@ -4,7 +4,10 @@ Settings Dock Widget for GEE Data Catalogs
 This module provides a settings panel for configuring plugin options.
 """
 
-from qgis.PyQt.QtCore import Qt, QSettings, pyqtSignal
+import os
+import time
+
+from qgis.PyQt.QtCore import Qt, QSettings, QThread, QUrl, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QDockWidget,
     QWidget,
@@ -22,15 +25,105 @@ from qgis.PyQt.QtWidgets import (
     QMessageBox,
     QTabWidget,
 )
-from qgis.PyQt.QtGui import QFont
+from qgis.PyQt.QtGui import QDesktopServices, QFont
 
-from .chat_dock import DEFAULT_MODELS, PROVIDERS
+from .chat_dock import DEFAULT_MODELS, DEFAULT_PROVIDER, PROVIDERS
+from ..oauth import (
+    CODEX_DEFAULT_CONFIG,
+    OPENAI_CODEX_AUTH_EXTRA_PARAMS,
+    OPENAI_CODEX_CALLBACK_PATH,
+    OPENAI_CODEX_CALLBACK_PORT,
+    clear_token_payload,
+    store_token_payload,
+)
+
+ENV_FALLBACKS = {
+    "openai_api_key": ("OPENAI_API_KEY",),
+    "anthropic_api_key": ("ANTHROPIC_API_KEY",),
+    "gemini_api_key": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    "aws_region": ("AWS_REGION", "AWS_DEFAULT_REGION"),
+    "ollama_host": ("OLLAMA_HOST",),
+    "litellm_api_key": ("LITELLM_API_KEY",),
+    "litellm_base_url": ("LITELLM_BASE_URL",),
+}
 
 
 def _enum_value(cls, enum_name, member_name):
     """Return an enum member from either scoped or legacy Qt APIs."""
     container = getattr(cls, enum_name, cls)
     return getattr(container, member_name)
+
+
+def _env_fallback(*env_names):
+    """Return the first non-empty environment value from ``env_names``."""
+    for env_name in env_names:
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+class OAuthLoginWorker(QThread):
+    """Run an OpenAI OAuth login flow without blocking QGIS."""
+
+    auth_url = pyqtSignal(str)
+    finished = pyqtSignal(dict)
+
+    def __init__(self, config, parent=None):
+        super().__init__(parent)
+        self.config = dict(config)
+
+    def run(self):
+        """Open a loopback OAuth flow and exchange the callback code."""
+        try:
+            from ..oauth import complete_loopback_flow, start_loopback_flow
+
+            is_codex = bool(self.config.get("codex"))
+            flow = start_loopback_flow(
+                self.config["authorization_url"],
+                client_id=self.config["client_id"],
+                scope=self.config.get("scope", ""),
+                redirect_host="localhost" if is_codex else "127.0.0.1",
+                port=OPENAI_CODEX_CALLBACK_PORT if is_codex else 0,
+                callback_path=OPENAI_CODEX_CALLBACK_PATH if is_codex else "/callback",
+                extra_params=OPENAI_CODEX_AUTH_EXTRA_PARAMS if is_codex else None,
+                fallback_port=not is_codex,
+            )
+            self.auth_url.emit(flow.authorization_url)
+            token = complete_loopback_flow(
+                flow,
+                token_url=self.config["token_url"],
+                client_id=self.config["client_id"],
+            )
+            self.finished.emit({"success": True, "token": token, "error": ""})
+        except Exception as exc:
+            self.finished.emit({"success": False, "token": {}, "error": str(exc)})
+
+
+class OAuthRefreshWorker(QThread):
+    """Refresh OpenAI OAuth tokens without blocking QGIS."""
+
+    finished = pyqtSignal(dict)
+
+    def __init__(self, config, refresh_token, parent=None):
+        super().__init__(parent)
+        self.config = dict(config)
+        self.refresh_token = refresh_token
+
+    def run(self):
+        """Refresh the OAuth token."""
+        try:
+            from ..oauth import refresh_oauth_token
+
+            token = refresh_oauth_token(
+                self.config["token_url"],
+                client_id=self.config["client_id"],
+                refresh_token=self.refresh_token,
+                scope=self.config.get("scope", ""),
+            )
+            self.finished.emit({"success": True, "token": token, "error": ""})
+        except Exception as exc:
+            self.finished.emit({"success": False, "token": {}, "error": str(exc)})
 
 
 class SettingsDockWidget(QDockWidget):
@@ -51,6 +144,8 @@ class SettingsDockWidget(QDockWidget):
         super().__init__("GEE Data Catalogs Settings", parent)
         self.iface = iface
         self.settings = QSettings()
+        self._oauth_worker = None
+        self._env_sourced_credentials = {}
 
         self.setAllowedAreas(
             Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
@@ -374,6 +469,46 @@ class SettingsDockWidget(QDockWidget):
         credentials_form.addRow("LiteLLM base URL:", self.litellm_base_url_input)
 
         layout.addWidget(credentials_group)
+        self._credential_inputs = (
+            ("openai_api_key", self.openai_key_input),
+            ("anthropic_api_key", self.anthropic_key_input),
+            ("gemini_api_key", self.gemini_key_input),
+            ("aws_region", self.aws_region_input),
+            ("ollama_host", self.ollama_host_input),
+            ("litellm_api_key", self.litellm_key_input),
+            ("litellm_base_url", self.litellm_base_url_input),
+        )
+
+        oauth_group = QGroupBox("ChatGPT Login")
+        oauth_form = QFormLayout(oauth_group)
+
+        oauth_note = QLabel(
+            "Login opens ChatGPT in your browser using the Codex OAuth flow."
+        )
+        oauth_note.setWordWrap(True)
+        oauth_note.setStyleSheet("font-size: 10px; color: gray;")
+        oauth_form.addRow(oauth_note)
+
+        oauth_button_layout = QHBoxLayout()
+        self.openai_oauth_login_btn = QPushButton("Login with ChatGPT")
+        self.openai_oauth_login_btn.clicked.connect(self._login_openai_oauth)
+        oauth_button_layout.addWidget(self.openai_oauth_login_btn)
+
+        self.openai_oauth_refresh_btn = QPushButton("Refresh")
+        self.openai_oauth_refresh_btn.clicked.connect(self._refresh_openai_oauth)
+        oauth_button_layout.addWidget(self.openai_oauth_refresh_btn)
+
+        self.openai_oauth_logout_btn = QPushButton("Logout")
+        self.openai_oauth_logout_btn.clicked.connect(self._logout_openai_oauth)
+        oauth_button_layout.addWidget(self.openai_oauth_logout_btn)
+        oauth_form.addRow("", oauth_button_layout)
+
+        self.openai_oauth_status_label = QLabel("Not logged in")
+        self.openai_oauth_status_label.setWordWrap(True)
+        self.openai_oauth_status_label.setStyleSheet("font-size: 10px; color: gray;")
+        oauth_form.addRow("Status:", self.openai_oauth_status_label)
+
+        layout.addWidget(oauth_group)
 
         note = QLabel(
             "Credential values are saved in QGIS settings and applied to the "
@@ -385,9 +520,141 @@ class SettingsDockWidget(QDockWidget):
         layout.addStretch()
         return widget
 
+    def _oauth_config(self):
+        """Return the built-in ChatGPT/Codex login settings."""
+        config = dict(CODEX_DEFAULT_CONFIG)
+        config["codex"] = True
+        return config
+
+    def _set_oauth_buttons_enabled(self, enabled):
+        """Enable or disable OAuth action buttons."""
+        self.openai_oauth_login_btn.setEnabled(enabled)
+        self.openai_oauth_refresh_btn.setEnabled(enabled)
+        self.openai_oauth_logout_btn.setEnabled(enabled)
+
+    def _login_openai_oauth(self):
+        """Start OpenAI OAuth login."""
+        if self._oauth_worker is not None:
+            return
+        try:
+            config = self._oauth_config()
+        except Exception as exc:
+            QMessageBox.warning(self, "ChatGPT Login", str(exc))
+            return
+
+        self.openai_oauth_status_label.setText("Waiting for browser login...")
+        self.openai_oauth_status_label.setStyleSheet("font-size: 10px; color: #1976D2;")
+        self._set_oauth_buttons_enabled(False)
+        self._oauth_worker = OAuthLoginWorker(config, self)
+        self._oauth_worker.auth_url.connect(self._open_oauth_browser)
+        self._oauth_worker.finished.connect(self._on_oauth_worker_finished)
+        self._oauth_worker.start()
+
+    def _refresh_openai_oauth(self):
+        """Refresh the stored OpenAI OAuth token."""
+        if self._oauth_worker is not None:
+            return
+        try:
+            config = self._oauth_config()
+            from ..oauth import load_token_payload
+
+            payload = load_token_payload(self.settings)
+            refresh_token = str(payload.get("refresh_token", "")).strip()
+            if not refresh_token:
+                raise ValueError("No refresh token is stored. Login again.")
+        except Exception as exc:
+            QMessageBox.warning(self, "ChatGPT Login", str(exc))
+            return
+
+        self.openai_oauth_status_label.setText("Refreshing token...")
+        self.openai_oauth_status_label.setStyleSheet("font-size: 10px; color: #1976D2;")
+        self._set_oauth_buttons_enabled(False)
+        self._oauth_worker = OAuthRefreshWorker(config, refresh_token, self)
+        self._oauth_worker.finished.connect(self._on_oauth_worker_finished)
+        self._oauth_worker.start()
+
+    def _logout_openai_oauth(self):
+        """Clear stored OpenAI OAuth tokens."""
+        try:
+            clear_token_payload(self.settings)
+        except Exception as exc:
+            QMessageBox.warning(self, "ChatGPT Login", str(exc))
+            return
+        self._refresh_oauth_status()
+        self.iface.messageBar().pushSuccess("GEE Data Catalogs", "ChatGPT logged out.")
+
+    def _open_oauth_browser(self, url):
+        """Open the OAuth authorization URL in the user's browser."""
+        QDesktopServices.openUrl(QUrl(url))
+
+    def _on_oauth_worker_finished(self, result):
+        """Persist OAuth tokens from the login or refresh worker."""
+        self._set_oauth_buttons_enabled(True)
+        self._oauth_worker = None
+        if not result.get("success"):
+            self.openai_oauth_status_label.setText("Login failed")
+            self.openai_oauth_status_label.setStyleSheet("font-size: 10px; color: red;")
+            QMessageBox.critical(self, "ChatGPT Login", result.get("error", "Failed"))
+            return
+        try:
+            store_token_payload(self.settings, result["token"])
+            index = self.provider_combo.findText("openai-codex")
+            if index >= 0:
+                self.provider_combo.setCurrentIndex(index)
+                self.settings.setValue(
+                    f"{self.SETTINGS_PREFIX}provider", "openai-codex"
+                )
+                model = self.model_input.text().strip() or DEFAULT_MODELS.get(
+                    "openai-codex", ""
+                )
+                if model:
+                    self.model_input.setText(model)
+                    self.settings.setValue(f"{self.SETTINGS_PREFIX}model", model)
+        except Exception as exc:
+            self.openai_oauth_status_label.setText("Token storage failed")
+            self.openai_oauth_status_label.setStyleSheet("font-size: 10px; color: red;")
+            QMessageBox.critical(self, "ChatGPT Login", str(exc))
+            return
+        self._refresh_oauth_status()
+        self.iface.messageBar().pushSuccess("GEE Data Catalogs", "ChatGPT connected.")
+
+    def _refresh_oauth_status(self):
+        """Update the OAuth login status label."""
+        authcfg = self.settings.value(f"{self.SETTINGS_PREFIX}openai_oauth_authcfg", "")
+        expires_at = self.settings.value(
+            f"{self.SETTINGS_PREFIX}openai_oauth_expires_at", "", type=str
+        )
+        if not str(authcfg).strip():
+            self.openai_oauth_status_label.setText("Not logged in")
+            self.openai_oauth_status_label.setStyleSheet(
+                "font-size: 10px; color: gray;"
+            )
+            return
+        if expires_at:
+            try:
+                expiry = time.strftime(
+                    "%Y-%m-%d %H:%M:%S",
+                    time.localtime(float(expires_at)),
+                )
+                text = f"Logged in. Access token expires at {expiry}."
+            except (TypeError, ValueError):
+                text = "Logged in. Access token expiry is unknown."
+        else:
+            text = "Logged in. Access token expiry is unknown."
+        self.openai_oauth_status_label.setText(text)
+        self.openai_oauth_status_label.setStyleSheet("font-size: 10px; color: green;")
+
     def _on_provider_changed(self, provider):
         """Update the model field when the provider changes."""
         self.model_input.setText(DEFAULT_MODELS.get(provider, ""))
+
+    def _credential_value(self, key):
+        """Return ``(value, from_env)`` for a credential field."""
+        saved = self.settings.value(f"{self.SETTINGS_PREFIX}{key}", "", type=str)
+        if str(saved).strip():
+            return str(saved), False
+        fallback = _env_fallback(*ENV_FALLBACKS.get(key, ()))
+        return fallback, bool(fallback)
 
     def _load_settings(self):
         """Load settings from QSettings."""
@@ -452,11 +719,11 @@ class SettingsDockWidget(QDockWidget):
 
         # AI model
         provider = self.settings.value(
-            f"{self.SETTINGS_PREFIX}provider", "openai", type=str
+            f"{self.SETTINGS_PREFIX}provider", DEFAULT_PROVIDER, type=str
         )
         provider_index = self.provider_combo.findText(provider)
         if provider_index < 0:
-            provider_index = self.provider_combo.findText("openai")
+            provider_index = self.provider_combo.findText(DEFAULT_PROVIDER)
         self.provider_combo.setCurrentIndex(
             provider_index if provider_index >= 0 else 0
         )
@@ -469,29 +736,14 @@ class SettingsDockWidget(QDockWidget):
         self.max_tokens_spin.setValue(
             self.settings.value(f"{self.SETTINGS_PREFIX}max_tokens", 4096, type=int)
         )
-        self.openai_key_input.setText(
-            self.settings.value(f"{self.SETTINGS_PREFIX}openai_api_key", "", type=str)
-        )
-        self.anthropic_key_input.setText(
-            self.settings.value(
-                f"{self.SETTINGS_PREFIX}anthropic_api_key", "", type=str
-            )
-        )
-        self.gemini_key_input.setText(
-            self.settings.value(f"{self.SETTINGS_PREFIX}gemini_api_key", "", type=str)
-        )
-        self.aws_region_input.setText(
-            self.settings.value(f"{self.SETTINGS_PREFIX}aws_region", "", type=str)
-        )
-        self.ollama_host_input.setText(
-            self.settings.value(f"{self.SETTINGS_PREFIX}ollama_host", "", type=str)
-        )
-        self.litellm_key_input.setText(
-            self.settings.value(f"{self.SETTINGS_PREFIX}litellm_api_key", "", type=str)
-        )
-        self.litellm_base_url_input.setText(
-            self.settings.value(f"{self.SETTINGS_PREFIX}litellm_base_url", "", type=str)
-        )
+        self._env_sourced_credentials = {}
+        for key, widget in self._credential_inputs:
+            value, from_env = self._credential_value(key)
+            widget.setText(value)
+            if from_env:
+                self._env_sourced_credentials[key] = value
+
+        self._refresh_oauth_status()
 
         self.status_label.setText("Settings loaded")
         self.status_label.setStyleSheet("color: gray; font-size: 10px;")
@@ -563,29 +815,12 @@ class SettingsDockWidget(QDockWidget):
         self.settings.setValue(
             f"{self.SETTINGS_PREFIX}max_tokens", self.max_tokens_spin.value()
         )
-        self.settings.setValue(
-            f"{self.SETTINGS_PREFIX}openai_api_key", self.openai_key_input.text()
-        )
-        self.settings.setValue(
-            f"{self.SETTINGS_PREFIX}anthropic_api_key",
-            self.anthropic_key_input.text(),
-        )
-        self.settings.setValue(
-            f"{self.SETTINGS_PREFIX}gemini_api_key", self.gemini_key_input.text()
-        )
-        self.settings.setValue(
-            f"{self.SETTINGS_PREFIX}aws_region", self.aws_region_input.text()
-        )
-        self.settings.setValue(
-            f"{self.SETTINGS_PREFIX}ollama_host", self.ollama_host_input.text()
-        )
-        self.settings.setValue(
-            f"{self.SETTINGS_PREFIX}litellm_api_key", self.litellm_key_input.text()
-        )
-        self.settings.setValue(
-            f"{self.SETTINGS_PREFIX}litellm_base_url",
-            self.litellm_base_url_input.text(),
-        )
+        for key, widget in self._credential_inputs:
+            current = widget.text()
+            env_value = self._env_sourced_credentials.get(key)
+            if env_value is not None and current == env_value:
+                continue
+            self.settings.setValue(f"{self.SETTINGS_PREFIX}{key}", current)
 
         self.settings.sync()
 
@@ -610,6 +845,12 @@ class SettingsDockWidget(QDockWidget):
         if reply != QMessageBox.StandardButton.Yes:
             return
 
+        try:
+            clear_token_payload(self.settings)
+        except Exception as exc:
+            QMessageBox.warning(self, "ChatGPT Login", str(exc))
+            return
+
         # General
         self.auto_init_check.setChecked(True)
         self.notifications_check.setChecked(True)
@@ -632,8 +873,8 @@ class SettingsDockWidget(QDockWidget):
         self.stretch_type.setCurrentIndex(0)
 
         # AI model
-        self.provider_combo.setCurrentText("openai")
-        self.model_input.setText(DEFAULT_MODELS["openai"])
+        self.provider_combo.setCurrentText(DEFAULT_PROVIDER)
+        self.model_input.setText(DEFAULT_MODELS[DEFAULT_PROVIDER])
         self.fast_check.setChecked(False)
         self.max_tokens_spin.setValue(4096)
         self.openai_key_input.clear()
@@ -643,6 +884,8 @@ class SettingsDockWidget(QDockWidget):
         self.ollama_host_input.clear()
         self.litellm_key_input.clear()
         self.litellm_base_url_input.clear()
+        self._env_sourced_credentials = {}
+        self._refresh_oauth_status()
 
         self.status_label.setText("Defaults restored (not saved)")
         self.status_label.setStyleSheet("color: orange; font-size: 10px;")

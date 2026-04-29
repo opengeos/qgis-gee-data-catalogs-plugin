@@ -7,6 +7,7 @@ This module provides utility functions for working with Earth Engine in QGIS.
 import json
 import os
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 try:
     import ee
@@ -25,6 +26,12 @@ _ee_initialized = False
 
 # Global registry to track EE layers for Inspector
 _ee_layer_registry = {}
+
+
+def _xyz_uri_from_tile_url(tile_url: str) -> str:
+    """Return a QGIS XYZ datasource URI with the nested tile URL encoded."""
+    encoded_url = quote(tile_url, safe=":/{}")
+    return f"type=xyz&url={encoded_url}&zmax=24&zmin=0"
 
 
 def _normalize_ee_asset_type(asset_type: str) -> str:
@@ -211,6 +218,49 @@ def get_ee_tile_url(
     return tile_url
 
 
+def _is_valid_qgis_layer(layer: Any) -> bool:
+    """Return True when ``layer`` is a valid QGIS raster layer."""
+    if not isinstance(layer, QgsRasterLayer):
+        return False
+    try:
+        return bool(layer.isValid())
+    except Exception:  # nosec B110
+        return False
+
+
+def _create_xyz_ee_layer(
+    ee_object: Any,
+    vis_params: Dict,
+    name: str,
+) -> QgsRasterLayer:
+    """Create a QGIS XYZ raster layer for an Earth Engine object."""
+    if isinstance(ee_object, (ee.Image, ee.ImageCollection)):
+        tile_url = get_ee_tile_url(ee_object, vis_params)
+        uri = _xyz_uri_from_tile_url(tile_url)
+        return QgsRasterLayer(uri, name, "wms")
+
+    if isinstance(ee_object, ee.FeatureCollection):
+        valid_style_keys = {
+            "color",
+            "pointSize",
+            "pointShape",
+            "width",
+            "fillColor",
+            "styleProperty",
+            "neighborhood",
+            "lineType",
+        }
+        style_params = {k: v for k, v in vis_params.items() if k in valid_style_keys}
+        styled_fc = ee_object
+        if style_params:
+            styled_fc = ee_object.style(**style_params)
+        tile_url = get_ee_tile_url(styled_fc, {})
+        uri = _xyz_uri_from_tile_url(tile_url)
+        return QgsRasterLayer(uri, name, "wms")
+
+    raise TypeError(f"Unsupported Earth Engine object type: {type(ee_object)}")
+
+
 def add_ee_layer(
     ee_object: Any,
     vis_params: Optional[Dict] = None,
@@ -253,13 +303,34 @@ def add_ee_layer(
     if iface and iface.mapCanvas():
         current_extent = iface.mapCanvas().extent()
 
-    # Try to use qgis_geemap if available
+    # Try to use qgis_geemap if available, but fall back to direct XYZ tiles
+    # when it returns no layer or an invalid layer.
+    layer = None
     try:
         from qgis_geemap.core.qgis_map import Map
 
         m = Map()
         layer = m.add_layer(ee_object, vis_params, name, shown, opacity)
+        if not _is_valid_qgis_layer(layer):
+            QgsMessageLog.logMessage(
+                f"qgis_geemap did not create a valid layer for '{name}'. "
+                "Falling back to direct Earth Engine XYZ tiles.",
+                "GEE Data Catalogs",
+                Qgis.MessageLevel.Warning,
+            )
+            layer = None
+    except ImportError:
+        layer = None
+    except Exception as exc:
+        QgsMessageLog.logMessage(
+            f"qgis_geemap failed for '{name}': {exc}. Falling back to direct "
+            "Earth Engine XYZ tiles.",
+            "GEE Data Catalogs",
+            Qgis.MessageLevel.Warning,
+        )
+        layer = None
 
+    if layer is not None:
         # Restore the map extent after qgis_geemap adds the layer
         if current_extent and iface and iface.mapCanvas():
             iface.mapCanvas().setExtent(current_extent)
@@ -273,38 +344,8 @@ def add_ee_layer(
             _store_ee_layer_metadata(layer, ee_object, vis_params)
 
         return layer
-    except ImportError:
-        pass
 
-    # Fallback: Handle different EE object types
-    if isinstance(ee_object, (ee.Image, ee.ImageCollection)):
-        tile_url = get_ee_tile_url(ee_object, vis_params)
-        uri = f"type=xyz&url={tile_url}&zmax=24&zmin=0"
-        layer = QgsRasterLayer(uri, name, "wms")
-    elif isinstance(ee_object, ee.FeatureCollection):
-        # For FeatureCollection, render as styled tiles
-        # Filter out params not supported by FeatureCollection.style()
-        # style() accepts: color, pointSize, pointShape, width, fillColor, styleProperty, neighborhood, lineType
-        valid_style_keys = {
-            "color",
-            "pointSize",
-            "pointShape",
-            "width",
-            "fillColor",
-            "styleProperty",
-            "neighborhood",
-            "lineType",
-        }
-        style_params = {k: v for k, v in vis_params.items() if k in valid_style_keys}
-
-        styled_fc = ee_object
-        if style_params:
-            styled_fc = ee_object.style(**style_params)
-        tile_url = get_ee_tile_url(styled_fc, {})
-        uri = f"type=xyz&url={tile_url}&zmax=24&zmin=0"
-        layer = QgsRasterLayer(uri, name, "wms")
-    else:
-        raise TypeError(f"Unsupported Earth Engine object type: {type(ee_object)}")
+    layer = _create_xyz_ee_layer(ee_object, vis_params, name)
 
     if not layer.isValid():
         raise ValueError(f"Failed to create valid layer: {name}")
@@ -555,7 +596,7 @@ def refresh_ee_layer(layer: QgsRasterLayer) -> bool:
             tile_url = get_ee_tile_url(ee_object, vis_params)
 
         # Update layer source
-        new_uri = f"type=xyz&url={tile_url}&zmax=24&zmin=0"
+        new_uri = _xyz_uri_from_tile_url(tile_url)
         layer.setDataSource(new_uri, layer.name(), "wms")
 
         QgsMessageLog.logMessage(
