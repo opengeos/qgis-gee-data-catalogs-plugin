@@ -1,6 +1,8 @@
 """Dockable AI assistant for the GEE Data Catalogs plugin."""
 
+import ast
 import html
+import json
 import os
 import re
 import time
@@ -27,15 +29,25 @@ from qgis.PyQt.QtWidgets import (
 )
 
 SETTINGS_PREFIX = "GeeDataCatalogs/"
+DEFAULT_PROVIDER = "openai-codex"
 DEFAULT_MODELS = {
     "bedrock": "us.anthropic.claude-sonnet-4-6",
     "openai": "gpt-5.5",
+    "openai-codex": "gpt-5.5",
     "anthropic": "claude-sonnet-4-6",
     "gemini": "gemini-3.1-pro-preview",
     "ollama": "qwen3.5:4b",
     "litellm": "openai/gpt-5.5",
 }
-PROVIDERS = ["bedrock", "openai", "anthropic", "gemini", "ollama", "litellm"]
+PROVIDERS = [
+    "bedrock",
+    "openai",
+    "openai-codex",
+    "anthropic",
+    "gemini",
+    "ollama",
+    "litellm",
+]
 MAX_CONTEXT_MESSAGES = 12
 MAX_CONTEXT_CHARS = 12000
 SAMPLE_PROMPTS = [
@@ -68,14 +80,11 @@ def _apply_environment_from_settings(settings):
     }
     for key, env_names in env_map.items():
         value = _setting(settings, key, "").strip()
-        if isinstance(env_names, str):
-            env_names = (env_names,)
         if value:
+            if isinstance(env_names, str):
+                env_names = (env_names,)
             for env_name in env_names:
                 os.environ[env_name] = value
-        else:
-            for env_name in env_names:
-                os.environ.pop(env_name, None)
 
 
 def _qt_value(enum_name, member_name):
@@ -179,6 +188,64 @@ def _markdown_to_basic_html(markdown):
         )
     close_lists()
     return "\n".join(html_lines)
+
+
+def _conversation_markdown(messages):
+    """Return the full chat transcript as Markdown."""
+    blocks = []
+    for msg in messages:
+        sender = str(msg.get("sender") or "").strip()
+        body = str(msg.get("body") or "").strip()
+        if not sender or not body:
+            continue
+        blocks.append(f"## {sender}\n\n{body}")
+    return "\n\n".join(blocks)
+
+
+def _extract_python_code_blocks(text):
+    """Return Python fenced code blocks from Markdown text."""
+    if not text:
+        return []
+    snippets = []
+    for match in re.finditer(r"```(?:python|py)?\s*\n(.*?)```", text, re.DOTALL):
+        code = match.group(1).strip()
+        if "ee." in code or "earthengine" in code.lower():
+            snippets.append(code)
+    return snippets
+
+
+def _extract_earth_engine_snippets(value):
+    """Extract Earth Engine Python snippets from nested tool-call metadata."""
+    snippets = []
+
+    def _walk(item):
+        if item is None:
+            return
+        if isinstance(item, dict):
+            snippet = item.get("earth_engine_python_snippet")
+            if isinstance(snippet, str) and snippet.strip():
+                snippets.append(snippet.strip())
+            for child in item.values():
+                _walk(child)
+            return
+        if isinstance(item, (list, tuple)):
+            for child in item:
+                _walk(child)
+            return
+        if isinstance(item, str):
+            text = item.strip()
+            if "earth_engine_python_snippet" not in text:
+                return
+            for parser in (json.loads, ast.literal_eval):
+                try:
+                    parsed = parser(text)
+                except Exception:  # nosec B112
+                    continue
+                _walk(parsed)
+                return
+
+    _walk(value)
+    return snippets
 
 
 class PromptTextEdit(QPlainTextEdit):
@@ -285,6 +352,9 @@ class ChatWorker(QThread):
                 )
 
             response = agent.chat(self.prompt)
+            snippets = _extract_earth_engine_snippets(response.tool_calls)
+            if not snippets:
+                snippets = _extract_python_code_blocks(response.answer_text or "")
             self.finished.emit(
                 {
                     "success": bool(response.success),
@@ -293,6 +363,7 @@ class ChatWorker(QThread):
                     "tools": ", ".join(response.executed_tools or []),
                     "cancelled": ", ".join(response.cancelled_tools or []),
                     "elapsed": f"{response.execution_time:.2f}s",
+                    "snippets": snippets,
                 }
             )
         except Exception as exc:
@@ -320,7 +391,7 @@ class ChatPanelWidget(QWidget):
         self._prompt_history = []
         self._history_index = None
         self._messages = []
-        self._last_assistant_markdown = ""
+        self._latest_snippet = ""
         self._status_started_at = None
         self._status_base_text = "Running"
         self._status_frame = 0
@@ -407,8 +478,13 @@ class ChatPanelWidget(QWidget):
 
         self.copy_md_btn = QPushButton("Copy Markdown")
         self.copy_md_btn.setEnabled(False)
-        self.copy_md_btn.clicked.connect(self._copy_latest_markdown)
+        self.copy_md_btn.clicked.connect(self._copy_transcript_markdown)
         button_layout.addWidget(self.copy_md_btn)
+
+        self.copy_snippet_btn = QPushButton("Copy Snippet")
+        self.copy_snippet_btn.setEnabled(False)
+        self.copy_snippet_btn.clicked.connect(self._copy_latest_snippet)
+        button_layout.addWidget(self.copy_snippet_btn)
         layout.addLayout(button_layout)
 
         self.status_label = QLabel("Ready. Ctrl+Enter sends. Up/Down cycles prompts.")
@@ -418,10 +494,10 @@ class ChatPanelWidget(QWidget):
 
     def _load_settings(self):
         """Load persisted model settings into the dock controls."""
-        provider = _setting(self.settings, "provider", "openai")
+        provider = _setting(self.settings, "provider", DEFAULT_PROVIDER)
         index = self.provider_combo.findText(provider)
         if index < 0:
-            index = self.provider_combo.findText("openai")
+            index = self.provider_combo.findText(DEFAULT_PROVIDER)
         self.provider_combo.setCurrentIndex(index if index >= 0 else 0)
 
         model = _setting(self.settings, "model", "")
@@ -457,9 +533,26 @@ class ChatPanelWidget(QWidget):
             )
             return
 
+        provider = self.provider_combo.currentText()
         self._save_model_settings()
-        self._record_prompt(prompt)
         _apply_environment_from_settings(self.settings)
+        if provider == "openai-codex":
+            try:
+                from ..oauth import ensure_openai_oauth_environment
+
+                ensure_openai_oauth_environment(
+                    self.settings,
+                    codex=True,
+                )
+            except Exception as exc:
+                QMessageBox.critical(
+                    self,
+                    "GEE Data Catalogs",
+                    f"OpenAI OAuth is not ready:\n\n{exc}",
+                )
+                return
+
+        self._record_prompt(prompt)
 
         try:
             from ..core.venv_manager import ensure_venv_packages_available
@@ -473,12 +566,15 @@ class ChatPanelWidget(QWidget):
             )
             return
 
-        provider = self.provider_combo.currentText()
-        model_id = self.model_input.text().strip()
+        model_id = self.model_input.text().strip() or DEFAULT_MODELS.get(provider, "")
+        if model_id and not self.model_input.text().strip():
+            self.model_input.setText(model_id)
         fast = self.fast_check.isChecked()
         max_tokens = self.settings.value(f"{SETTINGS_PREFIX}max_tokens", 4096, type=int)
         prompt_with_context = self._build_prompt_with_context(prompt)
 
+        self._latest_snippet = ""
+        self.copy_snippet_btn.setEnabled(False)
         self._append_message("You", prompt, markdown=False)
         self.prompt_input.clear()
         self.status_label.setStyleSheet("color: #1976D2; font-size: 10px;")
@@ -568,6 +664,13 @@ class ChatPanelWidget(QWidget):
         self._stop_running_status()
         if result.get("success"):
             answer = result.get("answer") or "(No text response.)"
+            snippets = result.get("snippets") or []
+            if snippets:
+                self._latest_snippet = snippets[-1]
+                self.copy_snippet_btn.setEnabled(True)
+            else:
+                self._latest_snippet = ""
+                self.copy_snippet_btn.setEnabled(False)
             details = []
             if result.get("tools"):
                 details.append(f"Tools: {result['tools']}")
@@ -579,6 +682,8 @@ class ChatPanelWidget(QWidget):
             self.status_label.setText("Ready")
             self.status_label.setStyleSheet("color: gray; font-size: 10px;")
         else:
+            self._latest_snippet = ""
+            self.copy_snippet_btn.setEnabled(False)
             error = result.get("error") or "Unknown error"
             cancelled = result.get("cancelled")
             if cancelled:
@@ -629,9 +734,7 @@ class ChatPanelWidget(QWidget):
         """Append a chat message and refresh the transcript."""
         body = message.strip()
         self._messages.append({"sender": sender, "body": body, "markdown": markdown})
-        if markdown:
-            self._last_assistant_markdown = body
-            self.copy_md_btn.setEnabled(True)
+        self.copy_md_btn.setEnabled(bool(self._messages))
         self._render_transcript()
 
     def _render_transcript(self):
@@ -653,21 +756,33 @@ class ChatPanelWidget(QWidget):
         end_cursor = getattr(getattr(QTextCursor, "MoveOperation", QTextCursor), "End")
         self.transcript.moveCursor(end_cursor)
 
-    def _copy_latest_markdown(self):
-        """Copy the latest assistant Markdown response to the clipboard."""
-        if not self._last_assistant_markdown:
+    def _copy_transcript_markdown(self):
+        """Copy the full chat transcript to the clipboard as Markdown."""
+        transcript = _conversation_markdown(self._messages)
+        if not transcript:
             return
         clipboard = QGuiApplication.clipboard()
         if clipboard is not None:
-            clipboard.setText(self._last_assistant_markdown)
-            self.status_label.setText("Copied latest response as Markdown.")
+            clipboard.setText(transcript)
+            self.status_label.setText("Copied chat history as Markdown.")
+            self.status_label.setStyleSheet("color: green; font-size: 10px;")
+
+    def _copy_latest_snippet(self):
+        """Copy the latest Earth Engine Python snippet to the clipboard."""
+        if not self._latest_snippet:
+            return
+        clipboard = QGuiApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(self._latest_snippet)
+            self.status_label.setText("Copied Earth Engine Python snippet.")
             self.status_label.setStyleSheet("color: green; font-size: 10px;")
 
     def _clear_transcript(self):
         """Clear all rendered chat messages."""
         self._messages = []
-        self._last_assistant_markdown = ""
+        self._latest_snippet = ""
         self.copy_md_btn.setEnabled(False)
+        self.copy_snippet_btn.setEnabled(False)
         self.transcript.clear()
 
     def _shutdown_running_state(self):
