@@ -1,3 +1,6 @@
+import sys
+import types
+
 from gee_data_catalogs.dialogs import chat_dock, settings_dock
 
 
@@ -92,3 +95,47 @@ def test_apply_environment_keeps_existing_env_when_setting_empty(monkeypatch):
     chat_dock._apply_environment_from_settings(_FakeSettings())
 
     assert chat_dock.os.environ["OPENAI_API_KEY"] == "existing-key"
+
+
+def test_confirm_tool_auto_approve_bypasses_confirmation(monkeypatch):
+    class _MessageBox:
+        @staticmethod
+        def question(*_args, **_kwargs):
+            raise AssertionError("confirmation dialog should not open")
+
+    monkeypatch.setattr(chat_dock, "QMessageBox", _MessageBox)
+    worker = chat_dock.ChatWorker(
+        None, None, "prompt", "openai", "gpt-5.5", False, 4096, True
+    )
+
+    assert worker._confirm_tool(types.SimpleNamespace(args={}, tool_name="tool"))
+
+
+def test_confirm_tool_uses_confirmation_when_auto_approve_is_off(monkeypatch):
+    qt_marshal = types.ModuleType("geoagent.tools._qt_marshal")
+    qt_marshal.run_on_qt_gui_thread = lambda callback: callback()
+    monkeypatch.setitem(sys.modules, "geoagent", types.ModuleType("geoagent"))
+    monkeypatch.setitem(
+        sys.modules, "geoagent.tools", types.ModuleType("geoagent.tools")
+    )
+    monkeypatch.setitem(sys.modules, "geoagent.tools._qt_marshal", qt_marshal)
+
+    class _StandardButton:
+        Yes = 1
+        No = 2
+
+    class _MessageBox:
+        StandardButton = _StandardButton
+
+        @staticmethod
+        def question(*_args, **_kwargs):
+            return _StandardButton.No
+
+    monkeypatch.setattr(chat_dock, "QMessageBox", _MessageBox)
+    iface = types.SimpleNamespace(mainWindow=lambda: None)
+    worker = chat_dock.ChatWorker(
+        iface, None, "prompt", "openai", "gpt-5.5", False, 4096, False
+    )
+    request = types.SimpleNamespace(args={"asset_id": "LANDSAT/LC09"}, tool_name="load")
+
+    assert not worker._confirm_tool(request)
