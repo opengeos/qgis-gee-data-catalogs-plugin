@@ -6,6 +6,7 @@ This module provides utility functions for working with Earth Engine in QGIS.
 
 import json
 import os
+import time
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
@@ -26,6 +27,84 @@ _ee_initialized = False
 
 # Global registry to track EE layers for Inspector
 _ee_layer_registry = {}
+
+# Identifier that the earthengine-api sends to Earth Engine on every API call
+# (getMapId, getInfo, etc.). The official QGIS GEE plugin does the same so EE
+# can attribute traffic and apply the right per-client quotas. This does not
+# affect tile fetches (those go through QGIS's network manager), only the
+# Python-side EE API calls.
+_EE_USER_AGENT = "qgis-gee-data-catalogs-plugin/0.11.0"
+_ee_user_agent_set = False
+
+
+def _set_ee_user_agent_once() -> None:
+    """Set a stable User-Agent for ee.data API calls (idempotent)."""
+    global _ee_user_agent_set
+    if _ee_user_agent_set or ee is None:
+        return
+    try:
+        if ee.data.getUserAgent() != _EE_USER_AGENT:
+            ee.data.setUserAgent(_EE_USER_AGENT)
+    except Exception:  # nosec B110 - best-effort, never fail init on this
+        return
+    _ee_user_agent_set = True
+
+
+# Cache of (asset_repr, hashable_vis_params) -> tile_url. Populated after a
+# successful getMapId() call so repeated adds of the same dataset (very common
+# when iterating in the AI Assistant) skip the network round-trip. Cleared
+# whenever Earth Engine is re-initialized to avoid stale URLs after re-auth.
+_tile_url_cache: Dict[tuple, str] = {}
+_TILE_CACHE_CAP = 64
+
+
+def _hashable_vis_params(vis_params: Dict) -> tuple:
+    """Return a hashable representation of vis_params for use as a cache key.
+
+    Values that are lists (e.g. ``palette``, ``bands``) are converted to
+    tuples so the resulting key is hashable. Items are sorted by key so two
+    dicts with the same contents produce the same key regardless of insertion
+    order.
+
+    Args:
+        vis_params: Visualization parameters dict.
+
+    Returns:
+        A tuple of (key, value) pairs suitable for use in a dict key.
+    """
+    items = []
+    for key, value in sorted(vis_params.items()):
+        if isinstance(value, list):
+            value = tuple(value)
+        items.append((key, value))
+    return tuple(items)
+
+
+def _tile_cache_key(ee_object: Any, vis_params: Dict) -> Optional[tuple]:
+    """Build a cache key for an EE object + vis_params combination.
+
+    Uses ``ee_object.serialize()`` when available (every ``ComputedObject``
+    has it) so the key reflects the full computation graph, not just the
+    Python object identity. Returns ``None`` if a stable key cannot be built,
+    in which case the caller should bypass the cache.
+
+    Args:
+        ee_object: An Earth Engine object.
+        vis_params: Visualization parameters dict.
+
+    Returns:
+        A hashable tuple key, or None if the object cannot be serialized.
+    """
+    try:
+        asset_repr = ee_object.serialize()
+    except Exception:  # nosec B110 - fall back to bypassing the cache
+        return None
+    return (asset_repr, _hashable_vis_params(vis_params))
+
+
+def _clear_tile_url_cache() -> None:
+    """Drop all cached tile URLs. Called after a successful EE re-init."""
+    _tile_url_cache.clear()
 
 
 def _xyz_uri_from_tile_url(tile_url: str) -> str:
@@ -84,6 +163,8 @@ def initialize_ee(project: str = None, credentials: Any = None) -> bool:
             "The 'ee' module is not installed. Please install earthengine-api."
         )
 
+    _set_ee_user_agent_once()
+
     if project is None or project == "":
         project = os.environ.get("EE_PROJECT_ID", None)
 
@@ -126,6 +207,7 @@ def initialize_ee(project: str = None, credentials: Any = None) -> bool:
             else:
                 ee.Initialize()
         _ee_initialized = True
+        _clear_tile_url_cache()
 
         QgsMessageLog.logMessage(
             "Earth Engine initialized successfully!",
@@ -163,6 +245,8 @@ def try_auto_initialize_ee() -> bool:
     if ee is None:
         return False
 
+    _set_ee_user_agent_once()
+
     project = os.environ.get("EE_PROJECT_ID", None)
     if not project:
         return False
@@ -170,6 +254,8 @@ def try_auto_initialize_ee() -> bool:
     try:
         ee.Initialize(project=project)
         _ee_initialized = True
+        _clear_tile_url_cache()
+
         QgsMessageLog.logMessage(
             f"Earth Engine auto-initialized with project: {project}",
             "GEE Data Catalogs",
@@ -188,12 +274,20 @@ def try_auto_initialize_ee() -> bool:
 def get_ee_tile_url(
     ee_object: Any,
     vis_params: Optional[Dict] = None,
+    name: str = "",
 ) -> str:
     """Get an XYZ tile URL for an Earth Engine object.
 
+    The synchronous ``getMapId()`` call to Earth Engine can take several
+    seconds on first request. The result is cached in ``_tile_url_cache`` so
+    repeated adds of the same (object, vis_params) pair return instantly.
+    Wall-clock timing is logged on every cache miss so that "slow" can be
+    distinguished from "hung" in the QGIS Log Messages panel.
+
     Args:
-        ee_object: An Earth Engine Image or ImageCollection.
+        ee_object: An Earth Engine Image, ImageCollection, or FeatureCollection.
         vis_params: Visualization parameters dictionary.
+        name: Optional layer name, used only in log messages for clarity.
 
     Returns:
         XYZ tile URL string.
@@ -209,11 +303,47 @@ def get_ee_tile_url(
     if isinstance(ee_object, ee.ImageCollection):
         ee_object = ee_object.mosaic()
 
-    # Get the map ID
-    map_id_dict = ee_object.getMapId(vis_params)
+    label = f" for '{name}'" if name else ""
 
-    # Construct the tile URL
+    cache_key = _tile_cache_key(ee_object, vis_params)
+    if cache_key is not None:
+        cached = _tile_url_cache.get(cache_key)
+        if cached is not None:
+            QgsMessageLog.logMessage(
+                f"Reusing cached tile URL{label}",
+                "GEE Data Catalogs",
+                Qgis.MessageLevel.Info,
+            )
+            return cached
+
+    started = time.monotonic()
+    try:
+        map_id_dict = ee_object.getMapId(vis_params)
+    except Exception as exc:
+        elapsed = time.monotonic() - started
+        QgsMessageLog.logMessage(
+            f"Earth Engine getMapId failed after {elapsed:.2f}s{label}: {exc}",
+            "GEE Data Catalogs",
+            Qgis.MessageLevel.Warning,
+        )
+        raise
+
+    elapsed = time.monotonic() - started
+    QgsMessageLog.logMessage(
+        f"Earth Engine getMapId completed in {elapsed:.2f}s{label}",
+        "GEE Data Catalogs",
+        Qgis.MessageLevel.Info,
+    )
+
     tile_url = map_id_dict.get("tile_fetcher").url_format
+
+    if cache_key is not None and tile_url:
+        if len(_tile_url_cache) >= _TILE_CACHE_CAP:
+            # FIFO eviction: drop the oldest entry (insertion order is
+            # preserved by dict in Python 3.7+).
+            oldest = next(iter(_tile_url_cache))
+            del _tile_url_cache[oldest]
+        _tile_url_cache[cache_key] = tile_url
 
     return tile_url
 
@@ -235,7 +365,7 @@ def _create_xyz_ee_layer(
 ) -> QgsRasterLayer:
     """Create a QGIS XYZ raster layer for an Earth Engine object."""
     if isinstance(ee_object, (ee.Image, ee.ImageCollection)):
-        tile_url = get_ee_tile_url(ee_object, vis_params)
+        tile_url = get_ee_tile_url(ee_object, vis_params, name=name)
         uri = _xyz_uri_from_tile_url(tile_url)
         return QgsRasterLayer(uri, name, "wms")
 
@@ -254,7 +384,7 @@ def _create_xyz_ee_layer(
         styled_fc = ee_object
         if style_params:
             styled_fc = ee_object.style(**style_params)
-        tile_url = get_ee_tile_url(styled_fc, {})
+        tile_url = get_ee_tile_url(styled_fc, {}, name=name)
         uri = _xyz_uri_from_tile_url(tile_url)
         return QgsRasterLayer(uri, name, "wms")
 
@@ -591,9 +721,9 @@ def refresh_ee_layer(layer: QgsRasterLayer) -> bool:
             styled_fc = ee_object
             if style_params:
                 styled_fc = ee_object.style(**style_params)
-            tile_url = get_ee_tile_url(styled_fc, {})
+            tile_url = get_ee_tile_url(styled_fc, {}, name=layer.name())
         else:
-            tile_url = get_ee_tile_url(ee_object, vis_params)
+            tile_url = get_ee_tile_url(ee_object, vis_params, name=layer.name())
 
         # Update layer source
         new_uri = _xyz_uri_from_tile_url(tile_url)

@@ -432,7 +432,35 @@ class ChatWorker(QThread):
                     confirm=self._confirm_tool,
                 )
 
+            # Capture per-tool wall-clock timing so the user can see where the
+            # seconds in a long chat turn go (LLM round-trips vs tool exec).
+            # Strands' ``Agent.add_hook`` expects a single callback function;
+            # to register a full ``HookProvider`` post-construction we route
+            # through ``Agent.hooks.register_hooks`` (or ``add_hook`` on the
+            # registry, depending on Strands version). HookProvider's own
+            # ``register_hooks`` method accepts a registry, so we call that.
+            timing_hook = None
+            try:
+                from ..core.tool_timing_hook import ToolTimingHookProvider
+
+                timing_hook = ToolTimingHookProvider()
+                hook_registry = agent.strands_agent.hooks
+                if hasattr(hook_registry, "add_hook"):
+                    hook_registry.add_hook(timing_hook)
+                else:
+                    timing_hook.register_hooks(hook_registry)
+            except Exception as exc:
+                # Non-fatal: a missing/changed Strands hook API should not
+                # break the chat. Log and continue without per-tool timing.
+                timing_hook = None
+                QgsMessageLog.logMessage(
+                    f"Could not attach tool timing hook: {exc}",
+                    "GEE Data Catalogs",
+                    Qgis.MessageLevel.Warning,
+                )
+
             response = agent.chat(self.prompt)
+            tool_timings = list(timing_hook.timings) if timing_hook else []
             snippets = _extract_earth_engine_snippets(response.tool_calls)
             if not snippets:
                 snippets = _extract_python_code_blocks(response.answer_text or "")
@@ -445,6 +473,8 @@ class ChatWorker(QThread):
                         "tools": ", ".join(response.executed_tools or []),
                         "cancelled": ", ".join(response.cancelled_tools or []),
                         "elapsed": f"{response.execution_time:.2f}s",
+                        "elapsed_seconds": float(response.execution_time or 0.0),
+                        "tool_timings": tool_timings,
                         "snippets": [],
                         "cancelled_by_user": True,
                     }
@@ -458,6 +488,8 @@ class ChatWorker(QThread):
                     "tools": ", ".join(response.executed_tools or []),
                     "cancelled": ", ".join(response.cancelled_tools or []),
                     "elapsed": f"{response.execution_time:.2f}s",
+                    "elapsed_seconds": float(response.execution_time or 0.0),
+                    "tool_timings": tool_timings,
                     "snippets": snippets,
                     "cancelled_by_user": False,
                 }
@@ -531,9 +563,20 @@ class ChatPanelWidget(QWidget):
         self.auto_approve_tools_check.setToolTip(
             "Run confirmation-required tools without prompting for this session."
         )
+        self.show_timing_check = QCheckBox("Per-step timing")
+        self.show_timing_check.setToolTip(
+            "Show per-tool and per-LLM-call elapsed times beneath each reply."
+        )
+        # Persist immediately on toggle so the preference survives a QGIS
+        # restart even if the user closes the dock without sending another
+        # prompt (otherwise it would only save inside ``_send_prompt``).
+        self.show_timing_check.toggled.connect(
+            lambda _checked: self._save_model_settings()
+        )
         mode_layout = QHBoxLayout()
         mode_layout.addWidget(self.fast_check)
         mode_layout.addWidget(self.auto_approve_tools_check)
+        mode_layout.addWidget(self.show_timing_check)
         mode_layout.addStretch(1)
         model_layout.addRow("", mode_layout)
         layout.addWidget(model_group)
@@ -618,6 +661,9 @@ class ChatPanelWidget(QWidget):
         self.auto_approve_tools_check.setChecked(
             _setting(self.settings, "auto_approve_tools", False, bool)
         )
+        self.show_timing_check.setChecked(
+            _setting(self.settings, "show_timing", True, bool)
+        )
 
     def _save_model_settings(self):
         """Persist the selected provider, model, and mode settings."""
@@ -631,6 +677,10 @@ class ChatPanelWidget(QWidget):
         self.settings.setValue(
             f"{SETTINGS_PREFIX}auto_approve_tools",
             self.auto_approve_tools_check.isChecked(),
+        )
+        self.settings.setValue(
+            f"{SETTINGS_PREFIX}show_timing",
+            self.show_timing_check.isChecked(),
         )
 
     def _on_provider_changed(self, provider):
@@ -802,6 +852,16 @@ class ChatPanelWidget(QWidget):
                 details.append(f"Tools: {result['tools']}")
             if result.get("elapsed"):
                 details.append(f"Elapsed: {result['elapsed']}")
+            tool_timings = result.get("tool_timings") or []
+            if tool_timings and self.show_timing_check.isChecked():
+                from ..core.tool_timing_hook import format_tool_timings
+
+                breakdown = format_tool_timings(
+                    tool_timings,
+                    total_elapsed=result.get("elapsed_seconds"),
+                )
+                if breakdown:
+                    details.append(breakdown)
             if details:
                 answer = f"{answer}\n\n" + "\n".join(details)
             self._append_message("GeoAgent", answer, markdown=True)

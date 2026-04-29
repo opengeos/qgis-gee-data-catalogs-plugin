@@ -28,6 +28,11 @@ REQUIRED_PACKAGES = [
     ("GeoAgent", "[providers]>=1.1.1"),
 ]
 
+# Module-level guard so the "added venv site-packages to sys.path" message
+# logs at most once per QGIS session, even though the function may be called
+# on every AI Assistant prompt and tool invocation.
+_sys_path_logged = False
+
 
 def _log(message: str, level=Qgis.MessageLevel.Info):
     """Log a message to the QGIS message log.
@@ -863,26 +868,40 @@ def verify_venv(
 
 
 def ensure_venv_packages_available() -> bool:
-    """Make venv packages importable by adding site-packages to sys.path.
+    """Add the dedicated venv's site-packages to ``sys.path`` if it exists.
 
-    Also patches the 'ee' module into any already-loaded modules that had
-    set ee = None due to ImportError before the venv was available.
+    This is a quiet, idempotent best-effort helper: when the dedicated venv
+    at ``VENV_DIR`` is missing, it silently returns False and lets the caller
+    rely on whatever Python environment is currently active (conda, system
+    pip, pixi, etc.). The actual presence of required packages is reported
+    by :func:`check_dependencies`, which uses ``importlib.metadata`` and
+    therefore picks up packages from any source.
+
+    Mirrors the pattern used by the sibling ``open_geoagent`` plugin so the
+    two plugins stay aligned and produce no spurious warnings on every AI
+    Assistant prompt.
+
+    Also patches the ``ee`` module into any already-loaded modules that had
+    set ``ee = None`` due to ImportError before the venv was on sys.path.
 
     Returns:
-        True if venv packages are available, False otherwise.
+        True if the venv site-packages was added or already present.
+        False if the venv does not exist or its site-packages cannot be located.
     """
+    global _sys_path_logged
+
     if not venv_exists():
-        _log("Venv does not exist, cannot load packages", Qgis.MessageLevel.Warning)
         return False
 
     site_packages = get_venv_site_packages()
     if site_packages is None:
-        _log(f"Venv site-packages not found in: {VENV_DIR}", Qgis.MessageLevel.Warning)
         return False
 
     if site_packages not in sys.path:
         sys.path.insert(0, site_packages)
-        _log(f"Added venv site-packages to sys.path: {site_packages}")
+        if not _sys_path_logged:
+            _log(f"Added venv site-packages to sys.path: {site_packages}")
+            _sys_path_logged = True
 
     # Patch ee into already-loaded modules that cached ee = None at import time
     _patch_ee_module()
