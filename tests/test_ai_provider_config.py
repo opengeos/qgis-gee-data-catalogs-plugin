@@ -37,6 +37,37 @@ def test_conversation_markdown_includes_full_history():
     )
 
 
+def test_extract_earth_engine_snippet_from_tool_metadata():
+    snippet = "import ee\nimage = ee.Image('NASA/NASADEM_HGT/001')"
+    tool_calls = [
+        {
+            "name": "load_gee_dataset",
+            "result": {
+                "content": [
+                    {
+                        "text": repr(
+                            {
+                                "success": True,
+                                "earth_engine_python_snippet": snippet,
+                            }
+                        )
+                    }
+                ]
+            },
+        }
+    ]
+
+    assert chat_dock._extract_earth_engine_snippets(tool_calls) == [snippet]
+
+
+def test_extract_python_code_block_fallback():
+    answer = "Layer code:\n```python\nimport ee\nimage = ee.Image('A/B')\n```"
+
+    assert chat_dock._extract_python_code_blocks(answer) == [
+        "import ee\nimage = ee.Image('A/B')"
+    ]
+
+
 def test_credential_value_prefers_saved_setting_over_environment(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "env-key")
     harness = _CredentialHarness({"GeeDataCatalogs/openai_api_key": "saved-key"})

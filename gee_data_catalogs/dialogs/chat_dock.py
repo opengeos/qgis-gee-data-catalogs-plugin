@@ -1,6 +1,8 @@
 """Dockable AI assistant for the GEE Data Catalogs plugin."""
 
+import ast
 import html
+import json
 import os
 import re
 import time
@@ -200,6 +202,52 @@ def _conversation_markdown(messages):
     return "\n\n".join(blocks)
 
 
+def _extract_python_code_blocks(text):
+    """Return Python fenced code blocks from Markdown text."""
+    if not text:
+        return []
+    snippets = []
+    for match in re.finditer(r"```(?:python|py)?\s*\n(.*?)```", text, re.DOTALL):
+        code = match.group(1).strip()
+        if "ee." in code or "earthengine" in code.lower():
+            snippets.append(code)
+    return snippets
+
+
+def _extract_earth_engine_snippets(value):
+    """Extract Earth Engine Python snippets from nested tool-call metadata."""
+    snippets = []
+
+    def _walk(item):
+        if item is None:
+            return
+        if isinstance(item, dict):
+            snippet = item.get("earth_engine_python_snippet")
+            if isinstance(snippet, str) and snippet.strip():
+                snippets.append(snippet.strip())
+            for child in item.values():
+                _walk(child)
+            return
+        if isinstance(item, (list, tuple)):
+            for child in item:
+                _walk(child)
+            return
+        if isinstance(item, str):
+            text = item.strip()
+            if "earth_engine_python_snippet" not in text:
+                return
+            for parser in (json.loads, ast.literal_eval):
+                try:
+                    parsed = parser(text)
+                except Exception:
+                    continue
+                _walk(parsed)
+                return
+
+    _walk(value)
+    return snippets
+
+
 class PromptTextEdit(QPlainTextEdit):
     """Prompt editor with chat-friendly keyboard shortcuts."""
 
@@ -304,6 +352,9 @@ class ChatWorker(QThread):
                 )
 
             response = agent.chat(self.prompt)
+            snippets = _extract_earth_engine_snippets(response.tool_calls)
+            if not snippets:
+                snippets = _extract_python_code_blocks(response.answer_text or "")
             self.finished.emit(
                 {
                     "success": bool(response.success),
@@ -312,6 +363,7 @@ class ChatWorker(QThread):
                     "tools": ", ".join(response.executed_tools or []),
                     "cancelled": ", ".join(response.cancelled_tools or []),
                     "elapsed": f"{response.execution_time:.2f}s",
+                    "snippets": snippets,
                 }
             )
         except Exception as exc:
@@ -339,6 +391,7 @@ class ChatPanelWidget(QWidget):
         self._prompt_history = []
         self._history_index = None
         self._messages = []
+        self._latest_snippet = ""
         self._status_started_at = None
         self._status_base_text = "Running"
         self._status_frame = 0
@@ -427,6 +480,11 @@ class ChatPanelWidget(QWidget):
         self.copy_md_btn.setEnabled(False)
         self.copy_md_btn.clicked.connect(self._copy_transcript_markdown)
         button_layout.addWidget(self.copy_md_btn)
+
+        self.copy_snippet_btn = QPushButton("Copy Snippet")
+        self.copy_snippet_btn.setEnabled(False)
+        self.copy_snippet_btn.clicked.connect(self._copy_latest_snippet)
+        button_layout.addWidget(self.copy_snippet_btn)
         layout.addLayout(button_layout)
 
         self.status_label = QLabel("Ready. Ctrl+Enter sends. Up/Down cycles prompts.")
@@ -515,6 +573,8 @@ class ChatPanelWidget(QWidget):
         max_tokens = self.settings.value(f"{SETTINGS_PREFIX}max_tokens", 4096, type=int)
         prompt_with_context = self._build_prompt_with_context(prompt)
 
+        self._latest_snippet = ""
+        self.copy_snippet_btn.setEnabled(False)
         self._append_message("You", prompt, markdown=False)
         self.prompt_input.clear()
         self.status_label.setStyleSheet("color: #1976D2; font-size: 10px;")
@@ -604,6 +664,13 @@ class ChatPanelWidget(QWidget):
         self._stop_running_status()
         if result.get("success"):
             answer = result.get("answer") or "(No text response.)"
+            snippets = result.get("snippets") or []
+            if snippets:
+                self._latest_snippet = snippets[-1]
+                self.copy_snippet_btn.setEnabled(True)
+            else:
+                self._latest_snippet = ""
+                self.copy_snippet_btn.setEnabled(False)
             details = []
             if result.get("tools"):
                 details.append(f"Tools: {result['tools']}")
@@ -615,6 +682,8 @@ class ChatPanelWidget(QWidget):
             self.status_label.setText("Ready")
             self.status_label.setStyleSheet("color: gray; font-size: 10px;")
         else:
+            self._latest_snippet = ""
+            self.copy_snippet_btn.setEnabled(False)
             error = result.get("error") or "Unknown error"
             cancelled = result.get("cancelled")
             if cancelled:
@@ -698,10 +767,22 @@ class ChatPanelWidget(QWidget):
             self.status_label.setText("Copied chat history as Markdown.")
             self.status_label.setStyleSheet("color: green; font-size: 10px;")
 
+    def _copy_latest_snippet(self):
+        """Copy the latest Earth Engine Python snippet to the clipboard."""
+        if not self._latest_snippet:
+            return
+        clipboard = QGuiApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(self._latest_snippet)
+            self.status_label.setText("Copied Earth Engine Python snippet.")
+            self.status_label.setStyleSheet("color: green; font-size: 10px;")
+
     def _clear_transcript(self):
         """Clear all rendered chat messages."""
         self._messages = []
+        self._latest_snippet = ""
         self.copy_md_btn.setEnabled(False)
+        self.copy_snippet_btn.setEnabled(False)
         self.transcript.clear()
 
     def _shutdown_running_state(self):
