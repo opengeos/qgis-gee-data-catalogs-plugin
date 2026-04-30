@@ -250,6 +250,20 @@ def _extract_earth_engine_snippets(value):
     return snippets
 
 
+def _collect_agent_turn_state(agent):
+    """Read per-turn tool-call state recorded on a GeoAgent instance.
+
+    GeoAgent's ``Agent`` populates ``_tool_calls`` and ``_cancelled`` via its
+    confirmation hook during both ``chat`` and ``stream_chat``. The non-streaming
+    path reads them through ``GeoAgentResponse``; streaming has no equivalent
+    response object today, so we read the same attributes directly. ``getattr``
+    keeps this resilient if a future GeoAgent release renames or removes them.
+    """
+    tool_calls = list(getattr(agent, "_tool_calls", []) or [])
+    cancelled = list(getattr(agent, "_cancelled", []) or [])
+    return tool_calls, cancelled
+
+
 def _format_tool_confirmation_details(tool_name, args):
     """Return readable confirmation details for a GeoAgent tool request."""
     args = args if isinstance(args, dict) else {}
@@ -538,7 +552,7 @@ class ChatWorker(QThread):
         asyncio.run(_collect_stream())
 
         answer = "".join(chunks)
-        tool_calls = list(getattr(agent, "_tool_calls", []) or [])
+        tool_calls, cancelled_tools = _collect_agent_turn_state(agent)
         snippets = _extract_earth_engine_snippets(tool_calls)
         if not snippets:
             snippets = _extract_python_code_blocks(answer)
@@ -561,7 +575,7 @@ class ChatWorker(QThread):
                 "answer": answer,
                 "error": "" if success else f"stop_reason={stop_reason}",
                 "tools": ", ".join(executed_tools),
-                "cancelled": ", ".join(getattr(agent, "_cancelled", []) or []),
+                "cancelled": ", ".join(cancelled_tools),
                 "elapsed": f"{elapsed_seconds:.2f}s",
                 "elapsed_seconds": elapsed_seconds,
                 "tool_timings": tool_timings,
@@ -587,6 +601,11 @@ class ChatPanelWidget(QWidget):
         self._latest_snippet = ""
         self._streaming_message_index = None
         self._streaming_answer = ""
+        self._pending_chunks = []
+        self._chunk_flush_timer = QTimer(self)
+        self._chunk_flush_timer.setSingleShot(True)
+        self._chunk_flush_timer.setInterval(80)
+        self._chunk_flush_timer.timeout.connect(self._flush_pending_chunks)
         self._status_started_at = None
         self._status_base_text = "Running"
         self._status_frame = 0
@@ -914,6 +933,9 @@ class ChatPanelWidget(QWidget):
     def _on_worker_finished(self, result):
         """Render the completed chat worker result."""
         self._stop_running_status()
+        if self._chunk_flush_timer.isActive():
+            self._chunk_flush_timer.stop()
+        self._flush_pending_chunks()
         if result.get("cancelled_by_user"):
             self._latest_snippet = ""
             self.copy_snippet_btn.setEnabled(False)
@@ -972,16 +994,28 @@ class ChatPanelWidget(QWidget):
         self._worker = None
         self._streaming_message_index = None
         self._streaming_answer = ""
+        self._pending_chunks.clear()
 
     def _on_worker_chunk(self, chunk):
-        """Render a streamed model text chunk."""
+        """Buffer a streamed model text chunk for coalesced rendering."""
         if not chunk:
             return
         if self._streaming_message_index is None:
             self._streaming_message_index = len(self._messages)
             self._messages.append({"sender": "GeoAgent", "body": "", "markdown": True})
             self.copy_md_btn.setEnabled(True)
-        self._streaming_answer += chunk
+        self._pending_chunks.append(chunk)
+        if not self._chunk_flush_timer.isActive():
+            self._chunk_flush_timer.start()
+
+    def _flush_pending_chunks(self):
+        """Append buffered chunks to the streaming message in one transcript pass."""
+        if not self._pending_chunks:
+            return
+        self._streaming_answer += "".join(self._pending_chunks)
+        self._pending_chunks.clear()
+        if self._streaming_message_index is None:
+            return
         self._update_message(
             self._streaming_message_index,
             self._streaming_answer,
