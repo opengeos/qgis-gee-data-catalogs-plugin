@@ -1,3 +1,4 @@
+import asyncio
 import sys
 import types
 
@@ -11,6 +12,9 @@ class _FakeSettings:
 
     def value(self, key, default="", type=str):  # noqa: A002
         return self.values.get(key, default)
+
+    def setValue(self, key, value):  # noqa: N802
+        self.values[key] = value
 
 
 class _CredentialHarness:
@@ -125,6 +129,10 @@ def test_apply_environment_keeps_existing_env_when_setting_empty(monkeypatch):
     assert chat_dock.os.environ["OPENAI_API_KEY"] == "existing-key"
 
 
+def test_stream_chat_setting_defaults_to_true():
+    assert chat_dock._setting(_FakeSettings(), "stream_chat", True, bool) is True
+
+
 def test_confirm_tool_auto_approve_bypasses_confirmation(monkeypatch):
     class _MessageBox:
         @staticmethod
@@ -182,3 +190,85 @@ def test_confirm_tool_uses_confirmation_when_auto_approve_is_off(monkeypatch):
     request = types.SimpleNamespace(args={"asset_id": "LANDSAT/LC09"}, tool_name="load")
 
     assert not worker._confirm_tool(request)
+
+
+def test_chat_worker_streams_when_enabled(monkeypatch):
+    """ChatWorker.run streams deltas through chunk_received when enabled."""
+    geoagent = types.ModuleType("geoagent")
+
+    class _Config:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class _Hooks:
+        def add_hook(self, _hook):
+            return None
+
+    class _StrandsAgent:
+        hooks = _Hooks()
+
+    class _StubAgent:
+        strands_agent = _StrandsAgent()
+        _tool_calls = []
+        _cancelled = []
+
+        async def stream_chat(self, prompt):
+            captured["prompt"] = prompt
+            yield {"data": "he"}
+            await asyncio.sleep(0)
+            yield {"data": "llo"}
+
+    captured = {}
+
+    def _factory(iface, **kwargs):
+        captured["iface"] = iface
+        captured["kwargs"] = kwargs
+        return _StubAgent()
+
+    geoagent.GeoAgentConfig = _Config
+    geoagent.for_gee_data_catalogs = _factory
+    monkeypatch.setitem(sys.modules, "geoagent", geoagent)
+    monkeypatch.setitem(
+        sys.modules,
+        "qgis.core",
+        types.SimpleNamespace(QgsProject=types.SimpleNamespace(instance=lambda: None)),
+    )
+    timing_module = types.ModuleType("gee_data_catalogs.core.tool_timing_hook")
+
+    class _TimingHook:
+        timings = []
+
+    timing_module.ToolTimingHookProvider = _TimingHook
+    monkeypatch.setitem(
+        sys.modules,
+        "gee_data_catalogs.core.tool_timing_hook",
+        timing_module,
+    )
+
+    sentinel_iface = object()
+    worker = chat_dock.ChatWorker(
+        sentinel_iface,
+        None,
+        "stream please",
+        "openai-codex",
+        "gpt-5.5",
+        True,
+        1024,
+        True,
+        stream=True,
+    )
+
+    chunks = []
+    emitted = {}
+    worker.chunk_received.connect(chunks.append)
+    worker.finished.connect(lambda payload: emitted.setdefault("payload", payload))
+
+    worker.run()
+
+    assert captured["iface"] is sentinel_iface
+    assert captured["prompt"] == "stream please"
+    assert captured["kwargs"]["fast"] is True
+    assert chunks == ["he", "llo"]
+    assert emitted["payload"]["success"] is True
+    assert emitted["payload"]["answer"] == "hello"
+    assert emitted["payload"]["streamed"] is True
