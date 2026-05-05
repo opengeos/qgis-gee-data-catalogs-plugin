@@ -3,7 +3,7 @@ name=Earth Engine Data Catalogs
 qgisMinimumVersion=3.28
 qgisMaximumVersion=4.99
 description=Browse, search, and load Google Earth Engine data catalogs directly in QGIS.
-version=0.11.0
+version=0.11.1
 author=Qiusheng Wu
 email=giswqs@gmail.com
 
@@ -37,6 +37,8 @@ experimental=False
 deprecated=False
 
 changelog=
+    0.11.1
+        - Fixed dependency installer Python detection for macOS QGIS app bundles
     0.11.0
         - Add an AI assistant for Earth Engine
     0.10.0
@@ -81,4 +83,3 @@ changelog=
         - Integration with qgis-geemap-plugin
         - Update checker functionality
         - Settings panel for configuration
-
