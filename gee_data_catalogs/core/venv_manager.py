@@ -181,73 +181,158 @@ def venv_exists(venv_dir: str = None) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _find_python_executable() -> str:
-    """Find a working Python executable for venv creation.
+def _is_python_executable_name(path: str) -> bool:
+    """Return True when a path name looks like a Python interpreter."""
+    name = os.path.basename(path).lower()
+    if name.endswith(".exe"):
+        name = name[:-4]
+    return name in ("python", "python3") or (
+        name.startswith("python") and name[6:7].isdigit()
+    )
 
-    On QGIS Windows, sys.executable may point to qgis-bin.exe rather than
-    a Python interpreter.  This function searches for the actual Python
-    executable using multiple strategies.
 
-    Returns:
-        Path to a Python executable, or sys.executable as fallback.
-    """
-    if platform.system() != "Windows":
-        return sys.executable
+def _python_candidate_matches_runtime(path: str) -> bool:
+    """Return True when a candidate is executable and matches QGIS Python."""
+    if not path or not os.path.isfile(path) or not _is_python_executable_name(path):
+        return False
+    try:
+        result = subprocess.run(  # nosec B603
+            [
+                path,
+                "-c",
+                "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=_get_clean_env_for_venv(),
+            **_get_subprocess_kwargs(),
+        )
+    except Exception:
+        return False
+    runtime_version = f"{sys.version_info.major}.{sys.version_info.minor}"
+    return result.returncode == 0 and result.stdout.strip() == runtime_version
 
-    # Strategy 1: Check if sys.executable is already Python
-    exe_name = os.path.basename(sys.executable).lower()
-    if exe_name in ("python.exe", "python3.exe"):
-        return sys.executable
 
-    # Strategy 2: Use sys._base_prefix to find the Python installation.
-    # On QGIS Windows, sys._base_prefix typically points to
-    # C:\Program Files\QGIS 3.x\apps\Python3x\
-    base_prefix = getattr(sys, "_base_prefix", None) or sys.prefix
-    python_in_prefix = os.path.join(base_prefix, "python.exe")
-    if os.path.isfile(python_in_prefix):
-        return python_in_prefix
+def _contents_dir_from_path(path: str) -> Optional[str]:
+    """Return the containing macOS app Contents directory for a path."""
+    if not path:
+        return None
+    current = path if os.path.isdir(path) else os.path.dirname(path)
+    for _ in range(8):
+        if os.path.basename(current) == "Contents":
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    return None
 
-    # Strategy 3: Look for python.exe next to sys.executable
+
+def _candidate_python_paths() -> List[str]:
+    """Return possible Python interpreter paths for QGIS-bundled Python."""
+    candidates = []
     exe_dir = os.path.dirname(sys.executable)
-    for name in ("python.exe", "python3.exe"):
-        candidate = os.path.join(exe_dir, name)
-        if os.path.isfile(candidate):
+    py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
+    names = (f"python{py_ver}", f"python{sys.version_info.major}", "python3", "python")
+
+    for attr in ("_base_executable", "executable"):
+        value = getattr(sys, attr, None)
+        if value:
+            candidates.append(value)
+
+    for attr in ("_base_prefix", "base_prefix", "prefix", "exec_prefix"):
+        prefix = getattr(sys, attr, None)
+        if not prefix:
+            continue
+        candidates.extend([os.path.join(prefix, "python.exe")])
+        candidates.extend(os.path.join(prefix, "bin", name) for name in names)
+        candidates.extend(
+            [
+                os.path.join(prefix, "Versions", py_ver, "bin", "python3"),
+                os.path.join(prefix, "Versions", "Current", "bin", "python3"),
+            ]
+        )
+
+    candidates.extend(os.path.join(exe_dir, name) for name in names)
+    candidates.extend(
+        [os.path.join(exe_dir, "python.exe"), os.path.join(exe_dir, "python3.exe")]
+    )
+
+    apps_dir = os.path.join(os.path.dirname(exe_dir), "apps")
+    if os.path.isdir(apps_dir):
+        for entry in sorted(os.listdir(apps_dir), reverse=True):
+            if entry.lower().startswith("python"):
+                candidates.append(os.path.join(apps_dir, entry, "python.exe"))
+
+    for root in [sys.executable, getattr(sys, "_base_executable", None), sys.prefix]:
+        contents_dir = _contents_dir_from_path(root)
+        if not contents_dir:
+            continue
+        candidates.extend(os.path.join(contents_dir, "MacOS", name) for name in names)
+        candidates.extend(
+            os.path.join(contents_dir, "MacOS", "bin", name) for name in names
+        )
+        candidates.extend(
+            [
+                os.path.join(
+                    contents_dir,
+                    "Frameworks",
+                    "Python.framework",
+                    "Versions",
+                    py_ver,
+                    "bin",
+                    "python3",
+                ),
+                os.path.join(
+                    contents_dir,
+                    "Frameworks",
+                    "Python.framework",
+                    "Versions",
+                    "Current",
+                    "bin",
+                    "python3",
+                ),
+                os.path.join(contents_dir, "Resources", "python", "bin", "python3"),
+                os.path.join(
+                    contents_dir,
+                    "Resources",
+                    "Python.app",
+                    "Contents",
+                    "MacOS",
+                    "Python",
+                ),
+            ]
+        )
+
+    for name in ("python3", "python"):
+        which_python = shutil.which(name)
+        if which_python:
+            candidates.append(which_python)
+
+    unique = []
+    seen = set()
+    for candidate in candidates:
+        if candidate and candidate not in seen:
+            unique.append(candidate)
+            seen.add(candidate)
+    return unique
+
+
+def _find_python_executable() -> str:
+    """Find a real Python executable for venv creation."""
+    for candidate in _candidate_python_paths():
+        if _python_candidate_matches_runtime(candidate):
             return candidate
 
-    # Strategy 4: Walk up from sys.executable to find apps/Python3x/python.exe
-    # Typical QGIS layout: .../QGIS 3.x/bin/qgis-bin.exe
-    #                       .../QGIS 3.x/apps/Python3x/python.exe
-    parent = os.path.dirname(exe_dir)
-    apps_dir = os.path.join(parent, "apps")
-    if os.path.isdir(apps_dir):
-        best_candidate = None
-        best_version_num = -1
-        for entry in os.listdir(apps_dir):
-            lower_entry = entry.lower()
-            if not lower_entry.startswith("python"):
-                continue
-            suffix = lower_entry.removeprefix("python")
-            digits = "".join(ch for ch in suffix if ch.isdigit())
-            if not digits:
-                continue
-            try:
-                version_num = int(digits)
-            except ValueError:
-                continue
-            candidate = os.path.join(apps_dir, entry, "python.exe")
-            if os.path.isfile(candidate) and version_num > best_version_num:
-                best_version_num = version_num
-                best_candidate = candidate
-        if best_candidate:
-            return best_candidate
-
-    # Strategy 5: Use shutil.which as last resort
-    which_python = shutil.which("python")
-    if which_python:
-        return which_python
-
-    # Fallback: return sys.executable (may fail, but preserves current behavior)
-    return sys.executable
+    candidates = "\n".join(f"  - {path}" for path in _candidate_python_paths())
+    raise RuntimeError(
+        "Could not find a Python executable matching the QGIS Python runtime.\n"
+        f"QGIS sys.executable: {sys.executable}\n"
+        f"Python version: {sys.version_info.major}.{sys.version_info.minor}\n"
+        "Checked candidates:\n"
+        f"{candidates or '  - none'}"
+    )
 
 
 def _get_system_python() -> str:
