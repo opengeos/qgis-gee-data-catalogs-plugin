@@ -6,7 +6,6 @@ integration, menu items, toolbar buttons, and dockable panels.
 """
 
 import os
-import sys
 
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QIcon
@@ -681,9 +680,12 @@ class GeeDataCatalogs:
         try:
             import qgis.utils as qgis_utils
         except Exception as exc:
-            print(
-                f"GEE Data Catalogs: could not import qgis.utils: {exc}",
-                file=sys.stderr,
+            from qgis.core import QgsMessageLog, Qgis
+
+            QgsMessageLog.logMessage(
+                f"Could not import qgis.utils: {exc}",
+                "GEE Data Catalogs",
+                Qgis.MessageLevel.Warning,
             )
             return None
 
@@ -713,10 +715,12 @@ class GeeDataCatalogs:
                 if plugin is not None:
                     return plugin
             except Exception as exc:
-                print(
-                    f"GEE Data Catalogs: failed to load OpenGeoAgent plugin "
-                    f"'{package_name}': {exc}",
-                    file=sys.stderr,
+                from qgis.core import QgsMessageLog, Qgis
+
+                QgsMessageLog.logMessage(
+                    f"Failed to load OpenGeoAgent plugin " f"'{package_name}': {exc}",
+                    "GEE Data Catalogs",
+                    Qgis.MessageLevel.Warning,
                 )
 
         return None
@@ -752,9 +756,12 @@ class GeeDataCatalogs:
                 action.trigger()
                 return
         except Exception as exc:
-            print(
-                f"GEE Data Catalogs: could not open QGIS Plugin Manager: {exc}",
-                file=sys.stderr,
+            from qgis.core import QgsMessageLog, Qgis
+
+            QgsMessageLog.logMessage(
+                f"Could not open QGIS Plugin Manager: {exc}",
+                "GEE Data Catalogs",
+                Qgis.MessageLevel.Warning,
             )
 
         QMessageBox.information(
@@ -783,9 +790,6 @@ class GeeDataCatalogs:
         )
         if hasattr(self, "catalog_action"):
             self.catalog_action.setChecked(catalog_visible)
-
-        if hasattr(self, "chat_action"):
-            self.chat_action.setChecked(False)
 
     def toggle_settings_dock(self):
         """Toggle the Settings dock widget visibility (with dependency gate)."""

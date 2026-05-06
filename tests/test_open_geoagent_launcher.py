@@ -30,6 +30,19 @@ def test_ai_assistant_button_raises_visible_open_geoagent_chat(monkeypatch):
     plugin.toggle_chat_dock.assert_not_called()
 
 
+def test_ai_assistant_button_prompts_install_when_open_geoagent_missing(monkeypatch):
+    monkeypatch.setattr(qgis_utils, "plugins", {}, raising=False)
+    monkeypatch.setattr(qgis_utils, "available_plugins", [], raising=False)
+
+    plugin = GeeDataCatalogs(MagicMock())
+    prompt = MagicMock()
+    monkeypatch.setattr(plugin, "_prompt_open_geoagent_install", prompt)
+
+    plugin.open_ai_assistant()
+
+    prompt.assert_called_once_with()
+
+
 def test_ai_assistant_button_loads_available_open_geoagent(monkeypatch):
     plugin = SimpleNamespace(toggle_chat_dock=MagicMock(), _chat_dock=None)
 
