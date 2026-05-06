@@ -2575,14 +2575,6 @@ class CatalogDockWidget(QDockWidget):
         self.export_tab = self._create_export_tab()
         self.tab_widget.addTab(self.export_tab, "Export")
 
-        # AI assistant tab
-        from .chat_dock import ChatPanelWidget
-
-        self.ai_assistant_tab = ChatPanelWidget(
-            self.iface, plugin=self.plugin, parent=self
-        )
-        self.tab_widget.addTab(self.ai_assistant_tab, "AI Assistant")
-
         # Progress bar
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
@@ -5581,10 +5573,10 @@ class CatalogDockWidget(QDockWidget):
             plugin._sync_panel_actions()
 
     def show_ai_assistant_tab(self):
-        """Show the AI assistant inside the main catalog panel."""
-        self.tab_widget.setCurrentWidget(self.ai_assistant_tab)
-        self.show()
-        self.raise_()
+        """Backward-compatible entry point for opening OpenGeoAgent chat."""
+        plugin = getattr(self, "plugin", None)
+        if plugin is not None and hasattr(plugin, "open_ai_assistant"):
+            plugin.open_ai_assistant()
 
     def _toggle_image_selection(self, checked):
         """Toggle visibility of image selection widgets."""
@@ -8981,10 +8973,5 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
         if self._timeseries_thread and self._timeseries_thread.isRunning():
             self._timeseries_thread.terminate()
             self._timeseries_thread.wait()
-
-        # Stop and wait for the AI assistant chat worker before deletion
-        ai_tab = getattr(self, "ai_assistant_tab", None)
-        if ai_tab is not None and hasattr(ai_tab, "shutdown"):
-            ai_tab.shutdown()
 
         event.accept()

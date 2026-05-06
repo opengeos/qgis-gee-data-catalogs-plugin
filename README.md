@@ -25,7 +25,7 @@ A comprehensive QGIS plugin for browsing, searching, and loading Google Earth En
 - **Conversion**: Convert Earth Engine JavaScript API to Python API
 - **Inspector**: Inspect Earth Engine layer values at specific locations
 - **Export**: Export Earth Engine layers to various file formats
-- **AI Assistant**: Ask GeoAgent about Earth Engine datasets and QGIS map actions, with streaming output enabled by default
+- **AI Assistant**: Open the OpenGeoAgent chat panel for Earth Engine dataset and QGIS map assistance
 - **Multiple Data Types**: Load EE Image, ImageCollection, and FeatureCollection layers
 - **Integration**: Works seamlessly with [qgis-geemap-plugin](https://github.com/opengeos/qgis-geemap-plugin)
 - **Update Checker**: Built-in plugin update checker from GitHub

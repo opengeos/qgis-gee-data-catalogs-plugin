@@ -6,11 +6,14 @@ integration, menu items, toolbar buttons, and dockable panels.
 """
 
 import os
+import sys
 
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QMenu, QToolBar, QMessageBox
 from qgis.core import QgsProject
+
+OPEN_GEOAGENT_PLUGIN_CANDIDATES = ("open_geoagent",)
 
 
 class GeeDataCatalogs:
@@ -143,9 +146,8 @@ class GeeDataCatalogs:
         self.chat_action = self.add_action(
             robot_icon,
             "AI Assistant",
-            self.toggle_chat_dock,
-            status_tip="Open the AI Assistant tab in the GEE Data Catalogs panel",
-            checkable=True,
+            self.open_ai_assistant,
+            status_tip="Open the OpenGeoAgent chat panel",
             parent=self.iface.mainWindow(),
         )
 
@@ -205,9 +207,6 @@ class GeeDataCatalogs:
 
         # Remove dock widgets
         if self._catalog_dock:
-            ai_tab = getattr(self._catalog_dock, "ai_assistant_tab", None)
-            if ai_tab is not None and hasattr(ai_tab, "shutdown"):
-                ai_tab.shutdown()
             self.iface.removeDockWidget(self._catalog_dock)
             self._catalog_dock.deleteLater()
             self._catalog_dock = None
@@ -645,30 +644,133 @@ class GeeDataCatalogs:
         """Handle Catalog dock visibility change."""
         self._sync_panel_actions()
 
-    def toggle_chat_dock(self):
-        """Toggle the AI assistant tab in the main Catalog panel."""
-        if self._catalog_dock is not None and self._catalog_dock.isVisible():
-            current_tab = self._catalog_dock.tab_widget.currentWidget()
-            if current_tab == self._catalog_dock.ai_assistant_tab:
-                self._catalog_dock.hide()
-                return
-            self._catalog_dock.show_ai_assistant_tab()
-            self._sync_panel_actions()
+    def open_ai_assistant(self):
+        """Open the OpenGeoAgent chat panel, or prompt for plugin installation."""
+        plugin = self._get_open_geoagent_plugin()
+        if plugin is None:
+            self._prompt_open_geoagent_install()
             return
 
-        self._ensure_dependencies(self._show_ai_assistant_tab)
+        if not hasattr(plugin, "toggle_chat_dock"):
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "OpenGeoAgent Required",
+                "OpenGeoAgent is installed, but this version does not expose "
+                "the chat panel launcher expected by GEE Data Catalogs.\n\n"
+                "Please update OpenGeoAgent and try again.",
+            )
+            return
 
-    def _show_ai_assistant_tab(self):
-        """Create/show the main panel and switch to the AI assistant tab."""
-        if self._catalog_dock is None:
-            self._create_catalog_dock()
-        if self._catalog_dock is not None:
-            self._catalog_dock.show_ai_assistant_tab()
-        self._sync_panel_actions()
+        try:
+            chat_dock = getattr(plugin, "_chat_dock", None)
+            if chat_dock is not None and chat_dock.isVisible():
+                chat_dock.show()
+                chat_dock.raise_()
+                return
+
+            plugin.toggle_chat_dock()
+        except Exception as exc:
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                "OpenGeoAgent",
+                f"Failed to open the OpenGeoAgent chat panel:\n{exc}",
+            )
+
+    def _get_open_geoagent_plugin(self):
+        """Return the loaded OpenGeoAgent plugin instance, loading it if possible."""
+        try:
+            import qgis.utils as qgis_utils
+        except Exception as exc:
+            print(
+                f"GEE Data Catalogs: could not import qgis.utils: {exc}",
+                file=sys.stderr,
+            )
+            return None
+
+        plugins = getattr(qgis_utils, "plugins", {}) or {}
+        for package_name in OPEN_GEOAGENT_PLUGIN_CANDIDATES:
+            plugin = plugins.get(package_name)
+            if plugin is not None:
+                return plugin
+
+        available = set(getattr(qgis_utils, "available_plugins", []) or [])
+        for package_name in OPEN_GEOAGENT_PLUGIN_CANDIDATES:
+            if package_name not in available:
+                continue
+
+            try:
+                load_plugin = getattr(qgis_utils, "loadPlugin", None)
+                if callable(load_plugin) and package_name not in plugins:
+                    load_plugin(package_name)
+
+                start_plugin = getattr(qgis_utils, "startPlugin", None)
+                active_plugins = getattr(qgis_utils, "active_plugins", []) or []
+                if callable(start_plugin) and package_name not in active_plugins:
+                    start_plugin(package_name)
+
+                plugins = getattr(qgis_utils, "plugins", {}) or {}
+                plugin = plugins.get(package_name)
+                if plugin is not None:
+                    return plugin
+            except Exception as exc:
+                print(
+                    f"GEE Data Catalogs: failed to load OpenGeoAgent plugin "
+                    f"'{package_name}': {exc}",
+                    file=sys.stderr,
+                )
+
+        return None
+
+    def _prompt_open_geoagent_install(self):
+        """Tell the user how to install OpenGeoAgent from the QGIS Plugin Manager."""
+        message = (
+            "The AI Assistant is provided by the OpenGeoAgent QGIS plugin.\n\n"
+            "Install it from the QGIS Plugin Manager:\n"
+            "  Plugins > Manage and Install Plugins... > All\n"
+            "  Search for 'OpenGeoAgent' and click Install Plugin.\n\n"
+            "After installing (or enabling) OpenGeoAgent, click the AI "
+            "Assistant button again."
+        )
+        box = QMessageBox(self.iface.mainWindow())
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle("Install OpenGeoAgent")
+        box.setText(message)
+        manager_button = box.addButton(
+            "Open Plugin Manager", QMessageBox.ButtonRole.ActionRole
+        )
+        box.addButton(QMessageBox.StandardButton.Ok)
+        box.exec()
+
+        if box.clickedButton() == manager_button:
+            self._open_qgis_plugin_manager()
+
+    def _open_qgis_plugin_manager(self):
+        """Open the QGIS Plugin Manager dialog."""
+        try:
+            action = self.iface.actionManagePlugins()
+            if action is not None:
+                action.trigger()
+                return
+        except Exception as exc:
+            print(
+                f"GEE Data Catalogs: could not open QGIS Plugin Manager: {exc}",
+                file=sys.stderr,
+            )
+
+        QMessageBox.information(
+            self.iface.mainWindow(),
+            "Open Plugin Manager",
+            "Open the QGIS Plugin Manager from the menu:\n"
+            "Plugins > Manage and Install Plugins...",
+        )
+
+    def toggle_chat_dock(self):
+        """Backward-compatible entry point for opening OpenGeoAgent chat."""
+        self.open_ai_assistant()
 
     def _create_chat_dock(self):
-        """Backward-compatible entry point for opening the assistant tab."""
-        self._show_ai_assistant_tab()
+        """Backward-compatible entry point for opening OpenGeoAgent chat."""
+        self.open_ai_assistant()
 
     def _on_chat_visibility_changed(self, visible):
         """Handle AI assistant dock visibility change."""
@@ -682,14 +784,8 @@ class GeeDataCatalogs:
         if hasattr(self, "catalog_action"):
             self.catalog_action.setChecked(catalog_visible)
 
-        assistant_visible = False
-        if catalog_visible and hasattr(self._catalog_dock, "ai_assistant_tab"):
-            assistant_visible = (
-                self._catalog_dock.tab_widget.currentWidget()
-                == self._catalog_dock.ai_assistant_tab
-            )
         if hasattr(self, "chat_action"):
-            self.chat_action.setChecked(assistant_visible)
+            self.chat_action.setChecked(False)
 
     def toggle_settings_dock(self):
         """Toggle the Settings dock widget visibility (with dependency gate)."""
