@@ -1278,7 +1278,7 @@ def ee_credentials_exist() -> bool:
 def authenticate_ee(
     progress_callback: Optional[Callable[[int, str], None]] = None,
 ) -> Tuple[bool, str]:
-    """Run ee.Authenticate() in the venv Python as a subprocess.
+    """Run ee.Authenticate() in an appropriate Python subprocess.
 
     This opens a browser window for the user to complete OAuth authentication.
     The subprocess is non-blocking — the user interacts with the browser, and
@@ -1290,19 +1290,32 @@ def authenticate_ee(
     Returns:
         A tuple of (success, message).
     """
-    if not venv_exists():
-        return False, "Virtual environment not found"
+    if venv_exists():
+        python_path = get_venv_python_path()
+        env = _get_clean_env_for_venv()
+    elif importlib.util.find_spec("ee") is not None:
+        python_path = sys.executable
+        env = os.environ.copy()
+    else:
+        return (
+            False,
+            "Virtual environment not found, and earthengine-api is not available "
+            "in the current QGIS Python. Install dependencies first.",
+        )
 
-    python_path = get_venv_python_path()
-    env = _get_clean_env_for_venv()
     kwargs = _get_subprocess_kwargs()
 
-    auth_code = "import ee; ee.Authenticate()"
+    # Bind the local OAuth callback on an ephemeral port to avoid collisions
+    # with anything already listening on the earthengine-api default port.
+    auth_code = "import ee; ee.Authenticate(auth_mode='localhost:0')"
 
     if progress_callback:
         progress_callback(50, "Waiting for browser authentication...")
 
-    _log("Running ee.Authenticate() in venv...")
+    _log(
+        "Running ee.Authenticate(auth_mode='localhost:0') "
+        f"with Python: {python_path}"
+    )
 
     try:
         result = subprocess.run(  # nosec B603
@@ -1321,8 +1334,11 @@ def authenticate_ee(
             return True, "Earth Engine authentication completed successfully"
         else:
             error = result.stderr or result.stdout or "Unknown error"
-            _log(f"EE authentication failed: {error[:200]}", Qgis.MessageLevel.Warning)
-            return False, f"Authentication failed: {error[:200]}"
+            _log(f"EE authentication failed:\n{error}", Qgis.MessageLevel.Warning)
+            return False, (
+                f"Authentication failed: {error[:500]}"
+                "\n\n(Full traceback in the QGIS Message Log -> GEE Data Catalogs channel.)"
+            )
 
     except subprocess.TimeoutExpired:
         return False, "Authentication timed out (5 minutes)"

@@ -24,6 +24,8 @@ from qgis.PyQt.QtWidgets import (
     QFormLayout,
     QMessageBox,
     QTabWidget,
+    QFileDialog,
+    QProgressBar,
 )
 from qgis.PyQt.QtGui import QDesktopServices, QFont
 
@@ -36,6 +38,11 @@ from ..oauth import (
     clear_token_payload,
     store_token_payload,
 )
+
+try:
+    import ee
+except ImportError:
+    ee = None
 
 ENV_FALLBACKS = {
     "openai_api_key": ("OPENAI_API_KEY",),
@@ -129,6 +136,7 @@ class OAuthRefreshWorker(QThread):
 class SettingsDockWidget(QDockWidget):
     """A settings panel for configuring plugin options."""
 
+    auth_succeeded = pyqtSignal()
     settings_saved = pyqtSignal()
 
     # Settings keys
@@ -144,6 +152,8 @@ class SettingsDockWidget(QDockWidget):
         super().__init__("GEE Data Catalogs Settings", parent)
         self.iface = iface
         self.settings = QSettings()
+        self._auth_worker = None
+        self._init_worker = None
         self._oauth_worker = None
         self._env_sourced_credentials = {}
 
@@ -307,7 +317,39 @@ class SettingsDockWidget(QDockWidget):
         info_label.setWordWrap(True)
         project_layout.addRow("", info_label)
 
+        cred_layout = QHBoxLayout()
+        self.credentials_input = QLineEdit()
+        self.credentials_input.setPlaceholderText("Optional path to credentials JSON")
+        cred_layout.addWidget(self.credentials_input)
+        self.browse_cred_btn = QPushButton("...")
+        self.browse_cred_btn.setMaximumWidth(30)
+        self.browse_cred_btn.clicked.connect(self._browse_credentials)
+        cred_layout.addWidget(self.browse_cred_btn)
+        project_layout.addRow("Credentials:", cred_layout)
+
         layout.addWidget(project_group)
+
+        actions_group = QGroupBox("Actions")
+        actions_layout = QVBoxLayout(actions_group)
+
+        auth_btn = QPushButton("Authenticate (opens browser)")
+        auth_btn.clicked.connect(self._authenticate_ee)
+        actions_layout.addWidget(auth_btn)
+
+        init_btn = QPushButton("Initialize Earth Engine")
+        init_btn.clicked.connect(self._initialize_ee)
+        actions_layout.addWidget(init_btn)
+
+        self.ee_status_label = QLabel("Status: Not initialized")
+        self.ee_status_label.setStyleSheet("color: gray;")
+        self.ee_status_label.setWordWrap(True)
+        actions_layout.addWidget(self.ee_status_label)
+
+        self.ee_progress_bar = QProgressBar()
+        self.ee_progress_bar.setVisible(False)
+        actions_layout.addWidget(self.ee_progress_bar)
+
+        layout.addWidget(actions_group)
 
         # Default filters
         filters_group = QGroupBox("Default Filters")
@@ -520,6 +562,134 @@ class SettingsDockWidget(QDockWidget):
         layout.addStretch()
         return widget
 
+    def _browse_credentials(self):
+        """Open file browser for an optional credentials JSON file."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Credentials File",
+            "",
+            "JSON Files (*.json);;All Files (*)",
+        )
+        if file_path:
+            self.credentials_input.setText(file_path)
+
+    def _get_ee_module(self):
+        """Return the Earth Engine module, re-importing after installs if needed."""
+        global ee
+        if ee is None:
+            try:
+                import ee as _ee
+
+                ee = _ee
+            except ImportError:
+                return None
+        return ee
+
+    def _initialize_ee(self):
+        """Initialize and verify Earth Engine with current settings."""
+        ee_module = self._get_ee_module()
+        if ee_module is None:
+            QMessageBox.warning(
+                self,
+                "Warning",
+                "Earth Engine API not installed.\n\nPlease install earthengine-api.",
+            )
+            return
+
+        project = self.ee_project_input.text().strip()
+        if not project:
+            project = os.environ.get("EE_PROJECT_ID", "")
+
+        if not project:
+            QMessageBox.warning(
+                self,
+                "Project ID Required",
+                "A Google Cloud project ID is required to initialize "
+                "Earth Engine.\n\nPlease enter your project ID above.",
+            )
+            self.ee_project_input.setFocus()
+            return
+
+        from .deps_manager import EEInitWorker
+
+        if self._init_worker is not None and self._init_worker.isRunning():
+            return
+
+        cred_file = self.credentials_input.text().strip() or None
+
+        self.ee_status_label.setText("Initializing & verifying Earth Engine...")
+        self.ee_status_label.setStyleSheet("color: blue;")
+        self.ee_progress_bar.setVisible(True)
+        self.ee_progress_bar.setRange(0, 0)
+
+        self._init_worker = EEInitWorker(project=project, credentials_path=cred_file)
+        self._init_worker.finished.connect(self._on_init_finished)
+        self._init_worker.start()
+
+    def _on_init_finished(self, success: bool, message: str):
+        """Handle EEInitWorker completion."""
+        self._init_worker = None
+        self.ee_progress_bar.setVisible(False)
+        self.ee_progress_bar.setRange(0, 100)
+
+        if success:
+            self.ee_status_label.setText("Status: Initialized & verified")
+            self.ee_status_label.setStyleSheet("color: green; font-weight: bold;")
+            self.iface.messageBar().pushSuccess(
+                "GEE Data Catalogs", "Earth Engine initialized successfully!"
+            )
+            return
+
+        self.ee_status_label.setText("Status: Error")
+        self.ee_status_label.setStyleSheet("color: red;")
+        QMessageBox.critical(
+            self,
+            "Earth Engine Initialization Failed",
+            message or "Earth Engine initialization failed.",
+        )
+
+    def _authenticate_ee(self):
+        """Start Earth Engine authentication in the background."""
+        from .deps_manager import EEAuthWorker
+
+        if self._auth_worker is not None and self._auth_worker.isRunning():
+            return
+
+        self.ee_status_label.setText(
+            "Authenticating... A browser window should open.\n"
+            "Complete the sign-in and return here."
+        )
+        self.ee_status_label.setStyleSheet("color: blue;")
+        self.ee_progress_bar.setVisible(True)
+        self.ee_progress_bar.setRange(0, 0)
+
+        self._auth_worker = EEAuthWorker()
+        self._auth_worker.progress.connect(self._on_auth_progress)
+        self._auth_worker.finished.connect(self._on_auth_finished)
+        self._auth_worker.start()
+
+    def _on_auth_progress(self, percent: int, message: str):
+        """Handle Earth Engine auth progress updates."""
+        self.ee_status_label.setText(message)
+
+    def _on_auth_finished(self, success: bool, message: str):
+        """Handle Earth Engine authentication completion."""
+        self._auth_worker = None
+        self.ee_progress_bar.setVisible(False)
+        self.ee_progress_bar.setRange(0, 100)
+
+        if success:
+            self.ee_status_label.setText("Status: Credentials found")
+            self.ee_status_label.setStyleSheet("color: green; font-weight: bold;")
+            self.iface.messageBar().pushSuccess(
+                "GEE Data Catalogs",
+                "Earth Engine authenticated successfully!",
+            )
+            self.auth_succeeded.emit()
+        else:
+            self.ee_status_label.setText(f"Authentication failed: {message[:150]}")
+            self.ee_status_label.setStyleSheet("color: red;")
+
     def _oauth_config(self):
         """Return the built-in ChatGPT/Codex login settings."""
         config = dict(CODEX_DEFAULT_CONFIG)
@@ -679,6 +849,9 @@ class SettingsDockWidget(QDockWidget):
         self.ee_project_input.setText(
             self.settings.value(f"{self.SETTINGS_PREFIX}ee_project", "", type=str)
         )
+        self.credentials_input.setText(
+            self.settings.value(f"{self.SETTINGS_PREFIX}credentials", "", type=str)
+        )
         self.default_cloud_cover.setValue(
             self.settings.value(
                 f"{self.SETTINGS_PREFIX}default_cloud_cover", 20, type=int
@@ -773,6 +946,9 @@ class SettingsDockWidget(QDockWidget):
             f"{self.SETTINGS_PREFIX}ee_project", self.ee_project_input.text()
         )
         self.settings.setValue(
+            f"{self.SETTINGS_PREFIX}credentials", self.credentials_input.text()
+        )
+        self.settings.setValue(
             f"{self.SETTINGS_PREFIX}default_cloud_cover",
             self.default_cloud_cover.value(),
         )
@@ -860,6 +1036,7 @@ class SettingsDockWidget(QDockWidget):
 
         # Earth Engine
         self.ee_project_input.clear()
+        self.credentials_input.clear()
         self.default_cloud_cover.setValue(20)
         self.default_date_range.setValue(365)
         self.max_features.setValue(5000)

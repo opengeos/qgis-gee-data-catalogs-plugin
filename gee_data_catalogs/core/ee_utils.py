@@ -24,6 +24,7 @@ from qgis.core import (
 
 # Track if EE has been initialized
 _ee_initialized = False
+_last_init_error: Optional[str] = None
 
 # Global registry to track EE layers for Inspector
 _ee_layer_registry = {}
@@ -136,6 +137,32 @@ def is_ee_initialized() -> bool:
     return _ee_initialized
 
 
+def mark_ee_initialized(value: bool = True) -> None:
+    """Set the cached Earth Engine initialization flag."""
+    global _ee_initialized, _last_init_error
+    _ee_initialized = value
+    if value:
+        _last_init_error = None
+
+
+def get_last_init_error() -> Optional[str]:
+    """Return the most recent Earth Engine initialization error."""
+    return _last_init_error
+
+
+def _get_settings_project() -> Optional[str]:
+    """Read the plugin's configured Earth Engine project ID."""
+    try:
+        from qgis.PyQt.QtCore import QSettings
+
+        settings = QSettings()
+        project = settings.value("GeeDataCatalogs/ee_project", "", type=str)
+        project = project.strip() if project else ""
+        return project or None
+    except Exception:
+        return None
+
+
 def _check_credentials_exist() -> bool:
     """Check if Earth Engine credentials file exists.
 
@@ -146,89 +173,79 @@ def _check_credentials_exist() -> bool:
     return os.path.exists(credentials_path)
 
 
-def initialize_ee(project: str = None, credentials: Any = None) -> bool:
+def initialize_ee(
+    project: str = None,
+    force: bool = False,
+    credentials: Any = None,
+) -> bool:
     """Initialize Earth Engine.
 
     Args:
-        project: Google Cloud project ID.
-        credentials: Optional credentials object.
+        project: Google Cloud project ID. If None, reads from plugin settings
+            then EE_PROJECT_ID.
+        force: If True, reinitialize even when already initialized.
+        credentials: Optional credentials object (e.g. a service-account
+            ``google.oauth2.service_account.Credentials``). When provided,
+            the on-disk OAuth credentials check is skipped.
 
     Returns:
         True if initialization was successful, False otherwise.
     """
-    global _ee_initialized
+    global _ee_initialized, _last_init_error
 
     if ee is None:
-        raise ImportError(
-            "The 'ee' module is not installed. Please install earthengine-api."
+        _last_init_error = (
+            "earthengine-api is not loaded. Please install earthengine-api, "
+            "then restart QGIS if prompted."
         )
+        return False
 
     _set_ee_user_agent_once()
 
-    if project is None or project == "":
-        project = os.environ.get("EE_PROJECT_ID", None)
+    if _ee_initialized and not force:
+        _last_init_error = None
+        return True
 
-    # Check if credentials file exists
-    if not _check_credentials_exist():
-        raise RuntimeError(
-            "Earth Engine credentials not found. Please authenticate first:\n\n"
-            "Option 1 - Authenticate via QGIS Python Console (Recommended):\n"
-            "  1. Go to Plugins > Python Console\n"
-            "  2. Run: import ee; ee.Authenticate()\n"
-            "  3. Follow the authentication instructions in your browser\n"
-            "  4. Return to QGIS and initialize Earth Engine again\n\n"
-            "Option 2 - Authenticate via terminal:\n"
-            "  1. Open a terminal\n"
-            "  2. Run: earthengine authenticate\n"
-            "  3. Follow the authentication instructions\n"
-            "  4. Restart QGIS after authentication"
+    if force:
+        _ee_initialized = False
+
+    if project is None or project.strip() == "":
+        project = _get_settings_project()
+        if not project:
+            project = os.environ.get("EE_PROJECT_ID", None)
+
+    if credentials is None and not _check_credentials_exist():
+        _last_init_error = (
+            "Earth Engine credentials not found. Open Settings -> Earth Engine "
+            "and click 'Authenticate (opens browser)', then retry initialization."
         )
+        return False
 
     try:
-        # Log initialization attempt
         QgsMessageLog.logMessage(
             f"Attempting to initialize Earth Engine with project: {project if project else 'None'}",
             "GEE Data Catalogs",
             Qgis.MessageLevel.Info,
         )
-
-        # Initialize without explicitly passing credentials=None
-        # This allows EE to auto-discover credentials from ~/.config/earthengine/
+        init_kwargs = {}
+        if project:
+            init_kwargs["project"] = project
         if credentials is not None:
-            # Only pass credentials if explicitly provided
-            if project:
-                ee.Initialize(credentials=credentials, project=project)
-            else:
-                ee.Initialize(credentials=credentials)
-        else:
-            # Let EE auto-discover credentials from ~/.config/earthengine/
-            if project:
-                ee.Initialize(project=project)
-            else:
-                ee.Initialize()
+            init_kwargs["credentials"] = credentials
+        ee.Initialize(**init_kwargs)
         _ee_initialized = True
+        _last_init_error = None
         _clear_tile_url_cache()
-
-        QgsMessageLog.logMessage(
-            "Earth Engine initialized successfully!",
-            "GEE Data Catalogs",
-            Qgis.MessageLevel.Success,
-        )
         return True
     except Exception as e:
-        error_msg = str(e)
-        if "authentication" in error_msg.lower() or "credential" in error_msg.lower():
-            raise RuntimeError(
-                f"Failed to initialize Earth Engine: {error_msg}\n\n"
-                "Please authenticate using QGIS Python Console:\n"
-                "  1. Go to Plugins > Python Console\n"
-                "  2. Run: import ee; ee.Authenticate()\n"
-                "  3. Follow the browser authentication steps\n"
-                "  4. Try initializing Earth Engine again\n\n"
-                "Note: Make sure you have set your Project ID in Settings."
-            )
-        else:
-            raise RuntimeError(f"Failed to initialize Earth Engine: {error_msg}")
+        _ee_initialized = False
+        project_desc = f"project={project!r}" if project else "no project"
+        _last_init_error = (
+            f"ee.Initialize({project_desc}) failed: {e!r}. "
+            "Open Settings -> Earth Engine, click 'Initialize Earth Engine' "
+            "to retest, then 'Authenticate (opens browser)' if needed."
+        )
+        return False
 
 
 def try_auto_initialize_ee() -> bool:
@@ -237,7 +254,7 @@ def try_auto_initialize_ee() -> bool:
     Returns:
         True if initialization was successful, False otherwise.
     """
-    global _ee_initialized
+    global _ee_initialized, _last_init_error
 
     if _ee_initialized:
         return True
@@ -247,13 +264,16 @@ def try_auto_initialize_ee() -> bool:
 
     _set_ee_user_agent_once()
 
-    project = os.environ.get("EE_PROJECT_ID", None)
+    project = _get_settings_project()
+    if not project:
+        project = os.environ.get("EE_PROJECT_ID", None)
     if not project:
         return False
 
     try:
         ee.Initialize(project=project)
         _ee_initialized = True
+        _last_init_error = None
         _clear_tile_url_cache()
 
         QgsMessageLog.logMessage(

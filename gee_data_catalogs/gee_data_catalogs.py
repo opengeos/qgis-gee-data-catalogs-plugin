@@ -326,7 +326,11 @@ class GeeDataCatalogs:
         """Try to auto-initialize Earth Engine if EE_PROJECT_ID is set."""
         try:
             from qgis.PyQt.QtCore import QSettings
-            from .core.ee_utils import initialize_ee, is_ee_initialized
+            from .core.ee_utils import (
+                get_last_init_error,
+                initialize_ee,
+                is_ee_initialized,
+            )
 
             # Check if already initialized
             if is_ee_initialized():
@@ -353,20 +357,16 @@ class GeeDataCatalogs:
 
             # Only try to initialize if we have a project ID
             if project_id:
-                try:
-                    from qgis.core import QgsMessageLog, Qgis
+                from qgis.core import QgsMessageLog, Qgis
 
+                QgsMessageLog.logMessage(
+                    f"Auto-initializing Earth Engine with project from {project_source}: {project_id}",
+                    "GEE Data Catalogs",
+                    Qgis.MessageLevel.Info,
+                )
+                if not initialize_ee(project=project_id):
                     QgsMessageLog.logMessage(
-                        f"Auto-initializing Earth Engine with project from {project_source}: {project_id}",
-                        "GEE Data Catalogs",
-                        Qgis.MessageLevel.Info,
-                    )
-                    initialize_ee(project=project_id)
-                except Exception as exc:
-                    from qgis.core import QgsMessageLog, Qgis
-
-                    QgsMessageLog.logMessage(
-                        f"Auto-init EE failed: {exc}",
+                        f"Auto-init EE failed: {get_last_init_error()}",
                         "GEE Data Catalogs",
                         Qgis.MessageLevel.Warning,
                     )
@@ -520,7 +520,7 @@ class GeeDataCatalogs:
         """Perform the actual EE initialization after dependencies are ready."""
         try:
             from qgis.PyQt.QtCore import QSettings
-            from .core.ee_utils import initialize_ee
+            from .core.ee_utils import initialize_ee, get_last_init_error
 
             # Read project ID from settings
             settings = QSettings()
@@ -541,8 +541,19 @@ class GeeDataCatalogs:
                 if project_id:
                     project_source = "EE_PROJECT_ID environment variable"
 
-            # Initialize with project ID
-            initialize_ee(project=project_id if project_id else None)
+            if not initialize_ee(
+                project=project_id if project_id else None, force=True
+            ):
+                detail = get_last_init_error() or (
+                    "Earth Engine initialization failed for an unknown reason."
+                )
+                QMessageBox.critical(
+                    self.iface.mainWindow(),
+                    "Earth Engine Initialization Failed",
+                    f"Failed to initialize Earth Engine:\n\n{detail}",
+                )
+                self._show_settings_ee_tab()
+                return
 
             success_msg = "Earth Engine initialized successfully!"
             if project_source:
@@ -706,6 +717,7 @@ class GeeDataCatalogs:
             self._settings_dock.visibilityChanged.connect(
                 self._on_settings_visibility_changed
             )
+            self._settings_dock.auth_succeeded.connect(self._on_auth_completed)
             self._settings_dock.settings_saved.connect(self._try_auto_init_ee)
             self.iface.addDockWidget(
                 Qt.DockWidgetArea.RightDockWidgetArea, self._settings_dock
@@ -731,7 +743,7 @@ class GeeDataCatalogs:
             self._settings_dock.show_ee_tab()
             self.iface.messageBar().pushInfo(
                 "GEE Data Catalogs",
-                "Please enter your Google Cloud project ID and click Save Settings.",
+                "Authenticate, enter your Google Cloud project ID, then initialize Earth Engine.",
             )
 
     def _on_settings_visibility_changed(self, visible):
