@@ -173,13 +173,20 @@ def _check_credentials_exist() -> bool:
     return os.path.exists(credentials_path)
 
 
-def initialize_ee(project: str = None, force: bool = False) -> bool:
+def initialize_ee(
+    project: str = None,
+    force: bool = False,
+    credentials: Any = None,
+) -> bool:
     """Initialize Earth Engine.
 
     Args:
         project: Google Cloud project ID. If None, reads from plugin settings
             then EE_PROJECT_ID.
         force: If True, reinitialize even when already initialized.
+        credentials: Optional credentials object (e.g. a service-account
+            ``google.oauth2.service_account.Credentials``). When provided,
+            the on-disk OAuth credentials check is skipped.
 
     Returns:
         True if initialization was successful, False otherwise.
@@ -199,12 +206,15 @@ def initialize_ee(project: str = None, force: bool = False) -> bool:
         _last_init_error = None
         return True
 
+    if force:
+        _ee_initialized = False
+
     if project is None or project.strip() == "":
         project = _get_settings_project()
         if not project:
             project = os.environ.get("EE_PROJECT_ID", None)
 
-    if not _check_credentials_exist():
+    if credentials is None and not _check_credentials_exist():
         _last_init_error = (
             "Earth Engine credentials not found. Open Settings -> Earth Engine "
             "and click 'Authenticate (opens browser)', then retry initialization."
@@ -217,15 +227,18 @@ def initialize_ee(project: str = None, force: bool = False) -> bool:
             "GEE Data Catalogs",
             Qgis.MessageLevel.Info,
         )
+        init_kwargs = {}
         if project:
-            ee.Initialize(project=project)
-        else:
-            ee.Initialize()
+            init_kwargs["project"] = project
+        if credentials is not None:
+            init_kwargs["credentials"] = credentials
+        ee.Initialize(**init_kwargs)
         _ee_initialized = True
         _last_init_error = None
         _clear_tile_url_cache()
         return True
     except Exception as e:
+        _ee_initialized = False
         project_desc = f"project={project!r}" if project else "no project"
         _last_init_error = (
             f"ee.Initialize({project_desc}) failed: {e!r}. "
@@ -241,7 +254,7 @@ def try_auto_initialize_ee() -> bool:
     Returns:
         True if initialization was successful, False otherwise.
     """
-    global _ee_initialized
+    global _ee_initialized, _last_init_error
 
     if _ee_initialized:
         return True

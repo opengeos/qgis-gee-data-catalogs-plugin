@@ -153,6 +153,7 @@ class SettingsDockWidget(QDockWidget):
         self.iface = iface
         self.settings = QSettings()
         self._auth_worker = None
+        self._init_worker = None
         self._oauth_worker = None
         self._env_sourced_credentials = {}
 
@@ -609,56 +610,42 @@ class SettingsDockWidget(QDockWidget):
             self.ee_project_input.setFocus()
             return
 
-        try:
-            cred_file = self.credentials_input.text().strip()
-            credentials = None
+        from .deps_manager import EEInitWorker
 
-            if cred_file:
-                from google.oauth2 import service_account
+        if self._init_worker is not None and self._init_worker.isRunning():
+            return
 
-                credentials = service_account.Credentials.from_service_account_file(
-                    cred_file,
-                    scopes=["https://www.googleapis.com/auth/earthengine"],
-                )
+        cred_file = self.credentials_input.text().strip() or None
 
-            if credentials is not None:
-                ee_module.Initialize(credentials=credentials, project=project)
-            else:
-                ee_module.Initialize(project=project)
-        except Exception as e:
-            self.ee_status_label.setText("Status: Error")
-            self.ee_status_label.setStyleSheet("color: red;")
-            QMessageBox.critical(
-                self,
-                "Initialization Error",
-                f"Failed to initialize Earth Engine:\n\n{str(e)}",
+        self.ee_status_label.setText("Initializing & verifying Earth Engine...")
+        self.ee_status_label.setStyleSheet("color: blue;")
+        self.ee_progress_bar.setVisible(True)
+        self.ee_progress_bar.setRange(0, 0)
+
+        self._init_worker = EEInitWorker(project=project, credentials_path=cred_file)
+        self._init_worker.finished.connect(self._on_init_finished)
+        self._init_worker.start()
+
+    def _on_init_finished(self, success: bool, message: str):
+        """Handle EEInitWorker completion."""
+        self._init_worker = None
+        self.ee_progress_bar.setVisible(False)
+        self.ee_progress_bar.setRange(0, 100)
+
+        if success:
+            self.ee_status_label.setText("Status: Initialized & verified")
+            self.ee_status_label.setStyleSheet("color: green; font-weight: bold;")
+            self.iface.messageBar().pushSuccess(
+                "GEE Data Catalogs", "Earth Engine initialized successfully!"
             )
             return
 
-        try:
-            ee_module.Number(1).getInfo()
-        except Exception as e:
-            self.ee_status_label.setText("Status: Error")
-            self.ee_status_label.setStyleSheet("color: red;")
-            QMessageBox.critical(
-                self,
-                "Earth Engine Verification Failed",
-                "Initialize succeeded but a test request failed:\n\n"
-                f"{str(e)}\n\n"
-                "Common causes: the Earth Engine API is not enabled for "
-                f"project '{project}', the account is not registered, or "
-                "the credentials are missing the required scopes.",
-            )
-            return
-
-        from ..core.ee_utils import mark_ee_initialized
-
-        mark_ee_initialized(True)
-
-        self.ee_status_label.setText("Status: Initialized & verified")
-        self.ee_status_label.setStyleSheet("color: green; font-weight: bold;")
-        self.iface.messageBar().pushSuccess(
-            "GEE Data Catalogs", "Earth Engine initialized successfully!"
+        self.ee_status_label.setText("Status: Error")
+        self.ee_status_label.setStyleSheet("color: red;")
+        QMessageBox.critical(
+            self,
+            "Earth Engine Initialization Failed",
+            message or "Earth Engine initialization failed.",
         )
 
     def _authenticate_ee(self):
