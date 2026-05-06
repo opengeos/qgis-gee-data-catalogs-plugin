@@ -1297,12 +1297,14 @@ def authenticate_ee(
     env = _get_clean_env_for_venv()
     kwargs = _get_subprocess_kwargs()
 
-    auth_code = "import ee; ee.Authenticate()"
+    # Bind the local OAuth callback on an ephemeral port to avoid collisions
+    # with anything already listening on the earthengine-api default port.
+    auth_code = "import ee; ee.Authenticate(auth_mode='localhost:0')"
 
     if progress_callback:
         progress_callback(50, "Waiting for browser authentication...")
 
-    _log("Running ee.Authenticate() in venv...")
+    _log("Running ee.Authenticate(auth_mode='localhost:0') in venv...")
 
     try:
         result = subprocess.run(  # nosec B603
@@ -1321,8 +1323,11 @@ def authenticate_ee(
             return True, "Earth Engine authentication completed successfully"
         else:
             error = result.stderr or result.stdout or "Unknown error"
-            _log(f"EE authentication failed: {error[:200]}", Qgis.MessageLevel.Warning)
-            return False, f"Authentication failed: {error[:200]}"
+            _log(f"EE authentication failed:\n{error}", Qgis.MessageLevel.Warning)
+            return False, (
+                f"Authentication failed: {error[:500]}"
+                "\n\n(Full traceback in the QGIS Message Log -> GEE Data Catalogs channel.)"
+            )
 
     except subprocess.TimeoutExpired:
         return False, "Authentication timed out (5 minutes)"
