@@ -1305,7 +1305,7 @@ def authenticate_ee(
                 "Install plugin dependencies first or run Earth Engine "
                 "authentication from the QGIS Python console.",
             )
-        env = os.environ.copy()
+        env = _get_clean_env_for_venv()
     else:
         return (
             False,

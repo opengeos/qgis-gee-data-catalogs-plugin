@@ -12,6 +12,10 @@ def test_authenticate_ee_falls_back_to_resolved_python(monkeypatch):
         calls["env"] = env
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
+    monkeypatch.setenv("PYTHONHOME", "/qgis/python")
+    monkeypatch.setenv("PYTHONPATH", "/qgis/python/site-packages")
+    monkeypatch.setenv("QGIS_PREFIX_PATH", "/qgis")
+
     monkeypatch.setattr(venv_manager, "venv_exists", lambda: False)
     monkeypatch.setattr(
         venv_manager.importlib.util,
@@ -30,7 +34,10 @@ def test_authenticate_ee_falls_back_to_resolved_python(monkeypatch):
     assert success is True
     assert "completed successfully" in message
     assert calls["cmd"][0] == resolved_python
-    assert "PYTHONPATH" in calls["env"] or isinstance(calls["env"], dict)
+    assert "PYTHONHOME" not in calls["env"]
+    assert "PYTHONPATH" not in calls["env"]
+    assert "QGIS_PREFIX_PATH" not in calls["env"]
+    assert calls["env"].get("PYTHONIOENCODING") == "utf-8"
 
 
 def test_authenticate_ee_reports_missing_python_executable(monkeypatch):
