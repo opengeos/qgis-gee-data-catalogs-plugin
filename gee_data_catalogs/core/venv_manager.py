@@ -1294,8 +1294,18 @@ def authenticate_ee(
         python_path = get_venv_python_path()
         env = _get_clean_env_for_venv()
     elif importlib.util.find_spec("ee") is not None:
-        python_path = sys.executable
-        env = os.environ.copy()
+        try:
+            python_path = _find_python_executable()
+        except RuntimeError as exc:
+            _log(str(exc), Qgis.MessageLevel.Warning)
+            return (
+                False,
+                "earthengine-api is available in QGIS, but the plugin could not "
+                "find a real Python executable to run authentication. "
+                "Install plugin dependencies first or run Earth Engine "
+                "authentication from the QGIS Python console.",
+            )
+        env = _get_clean_env_for_venv()
     else:
         return (
             False,
