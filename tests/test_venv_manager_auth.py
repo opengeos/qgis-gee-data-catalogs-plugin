@@ -1,6 +1,43 @@
 import types
 
 from gee_data_catalogs.core import venv_manager
+from gee_data_catalogs.core import uv_manager
+
+
+def test_create_venv_uses_uv_managed_python_when_system_python_missing(
+    monkeypatch, tmp_path
+):
+    calls = {}
+    venv_dir = str(tmp_path / "venv")
+
+    def fake_run(cmd, capture_output, text, timeout, env, **kwargs):
+        calls["cmd"] = cmd
+        calls["env"] = env
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        venv_manager,
+        "_get_system_python",
+        lambda: (_ for _ in ()).throw(RuntimeError("no local python")),
+    )
+    monkeypatch.setattr(uv_manager, "uv_exists", lambda: True)
+    monkeypatch.setattr(uv_manager, "get_uv_path", lambda: "/tmp/uv")
+    monkeypatch.setattr(venv_manager.subprocess, "run", fake_run)
+
+    success, message = venv_manager.create_venv(venv_dir=venv_dir)
+
+    assert success is True
+    assert message == "Virtual environment created"
+    assert calls["cmd"] == [
+        "/tmp/uv",
+        "venv",
+        "--managed-python",
+        "--python",
+        f"{venv_manager.sys.version_info.major}.{venv_manager.sys.version_info.minor}",
+        venv_dir,
+    ]
+    assert "PYTHONHOME" not in calls["env"]
+    assert "PYTHONPATH" not in calls["env"]
 
 
 def test_authenticate_ee_falls_back_to_resolved_python(monkeypatch):
