@@ -36,7 +36,7 @@ icon=icons/icon.svg
 experimental=False
 deprecated=False
 
-changelog=
+changelog=Fix macOS QGIS installer dependency installation and bump patch version.
     0.12.1
         - Fix Earth Engine authentication launching QGIS instead of Python
     0.12.0
