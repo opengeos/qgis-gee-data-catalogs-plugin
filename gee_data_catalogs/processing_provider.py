@@ -176,13 +176,26 @@ class GenerateSnippetAlgorithm(QgsProcessingAlgorithm):
         vis_max = self.parameterAsString(parameters, self.VIS_MAX, context).strip()
         palette = self.parameterAsString(parameters, self.PALETTE, context).strip()
 
+        def _parse_number(text, label):
+            """Parse a numeric string, preferring int but accepting float forms."""
+            try:
+                return int(text)
+            except ValueError:
+                pass
+            try:
+                return float(text)
+            except ValueError as exc:
+                raise QgsProcessingException(
+                    tr(f"Invalid {label} value: {text!r}")
+                ) from exc
+
         vis = {}
         if bands:
             vis["bands"] = [band.strip() for band in bands.split(",") if band.strip()]
         if vis_min:
-            vis["min"] = float(vis_min) if "." in vis_min else int(vis_min)
+            vis["min"] = _parse_number(vis_min, "visualization min")
         if vis_max:
-            vis["max"] = float(vis_max) if "." in vis_max else int(vis_max)
+            vis["max"] = _parse_number(vis_max, "visualization max")
         if palette:
             vis["palette"] = [
                 color.strip() for color in palette.split(",") if color.strip()
@@ -267,7 +280,16 @@ class LoadAssetAlgorithm(QgsProcessingAlgorithm):
         )
 
     def processAlgorithm(self, parameters, context, feedback):
-        import ee
+        try:
+            import ee
+        except ImportError as exc:
+            raise QgsProcessingException(
+                tr(
+                    "earthengine-api is not installed in this Python environment. "
+                    "Open the GEE Data Catalogs plugin and use the dependency "
+                    "installer, or install 'earthengine-api' manually."
+                )
+            ) from exc
 
         from .core.ee_utils import (
             add_ee_layer,

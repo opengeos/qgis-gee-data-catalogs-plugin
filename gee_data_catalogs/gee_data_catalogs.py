@@ -245,8 +245,15 @@ class GeeDataCatalogs:
 
             self._processing_provider = GeeDataCatalogsProvider()
             QgsApplication.processingRegistry().addProvider(self._processing_provider)
-        except Exception:
+        except Exception as exc:
             self._processing_provider = None
+            from qgis.core import QgsMessageLog, Qgis
+
+            QgsMessageLog.logMessage(
+                f"Failed to register Processing provider: {exc}",
+                "GEE Data Catalogs",
+                Qgis.MessageLevel.Warning,
+            )
 
     def _unregister_processing_provider(self):
         """Unregister QGIS Processing algorithms."""

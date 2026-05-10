@@ -1062,13 +1062,15 @@ def search_datasets(
         results.append(result)
 
     if query_lower:
+        # Sort by score desc, official-source desc, then name asc.
+        # We invert the numeric/boolean keys so reverse=True is unnecessary,
+        # otherwise the name tie-breaker would also be reversed.
         results.sort(
             key=lambda item: (
-                item.get("_search_score", 0),
-                item.get("source") == "official",
+                -item.get("_search_score", 0),
+                0 if item.get("source") == "official" else 1,
                 str(item.get("name", "")),
-            ),
-            reverse=True,
+            )
         )
 
     return results
