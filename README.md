@@ -11,6 +11,8 @@ A comprehensive QGIS plugin for browsing, searching, and loading Google Earth En
   - [Official Earth Engine Data Catalog](https://github.com/opengeos/Earth-Engine-Catalog) - 780+ datasets
   - [Awesome GEE Community Catalog](https://github.com/samapriya/awesome-gee-community-datasets) - 4,360+ community datasets
 - **Search & Filter**: Search datasets by keywords, tags, providers, data types, and sources
+- **Ranked Search & Saved Workflows**: Relevance-ranked search, favorites, recent datasets, and reusable analysis recipes
+- **Persistent Catalog Cache**: Disk-backed catalog cache for faster startup and offline fallback
 - **Advanced Filtering for ImageCollections**:
   - Date range filtering
   - Bounding box (current map extent)
@@ -25,7 +27,10 @@ A comprehensive QGIS plugin for browsing, searching, and loading Google Earth En
 - **Conversion**: Convert Earth Engine JavaScript API to Python API
 - **Inspector**: Inspect Earth Engine layer values at specific locations
 - **Export**: Export Earth Engine layers to various file formats
+- **Export Queue & History**: Queue multiple exports and keep recent export job status
 - **AI Assistant**: Open the OpenGeoAgent chat panel for Earth Engine dataset and QGIS map assistance
+- **Project Snapshot**: Copy/share current EE layers, map extent, selected dataset, and QGIS layer context
+- **QGIS Processing Provider**: Run catalog search, snippet generation, and EE asset loading from QGIS Processing/Model Builder
 - **Multiple Data Types**: Load EE Image, ImageCollection, and FeatureCollection layers
 - **Integration**: Works seamlessly with [qgis-geemap-plugin](https://github.com/opengeos/qgis-geemap-plugin)
 - **Update Checker**: Built-in plugin update checker from GitHub

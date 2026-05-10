@@ -7,7 +7,7 @@ and loading Google Earth Engine datasets.
 
 from datetime import datetime, timedelta
 
-from qgis.PyQt.QtCore import Qt, QCoreApplication, QThread, pyqtSignal, QTimer
+from qgis.PyQt.QtCore import Qt, QCoreApplication, QEvent, QThread, pyqtSignal, QTimer
 from qgis.PyQt.QtWidgets import (
     QDockWidget,
     QWidget,
@@ -40,6 +40,7 @@ from qgis.PyQt.QtWidgets import (
     QButtonGroup,
     QSlider,
     QFileDialog,
+    QHeaderView,
 )
 from qgis.PyQt.QtGui import QFont, QCursor
 from qgis.core import QgsProject, QgsRectangle, QgsMessageLog, Qgis
@@ -1389,8 +1390,16 @@ class TimeSeriesChartDialog(QWidget):
         self.band_list = QListWidget()
         self.band_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
         self.band_list.setMaximumHeight(100)
-        self.band_list.itemSelectionChanged.connect(self._update_chart)
+        self.band_list.itemSelectionChanged.connect(self._on_band_selection_changed)
         band_layout.addWidget(self.band_list)
+
+        band_button_layout = QVBoxLayout()
+        self.clear_bands_btn = QPushButton("Clear Bands")
+        self.clear_bands_btn.setToolTip("Clear all selected bands from the chart.")
+        self.clear_bands_btn.clicked.connect(self._clear_selected_bands)
+        band_button_layout.addWidget(self.clear_bands_btn)
+        band_button_layout.addStretch()
+        band_layout.addLayout(band_button_layout)
         layout.addLayout(band_layout)
 
         # Chart options
@@ -1516,13 +1525,7 @@ class TimeSeriesChartDialog(QWidget):
             f"Time Series at ({lon:.6f}, {lat:.6f})\n" f"Dataset: {asset_id}"
         )
 
-        # Populate band list
-        self.band_list.clear()
-        bands = data.get("bands", [])
-        for band in bands:
-            item = QListWidgetItem(band)
-            self.band_list.addItem(item)
-            item.setSelected(True)  # Select all bands by default
+        self._populate_band_list(data.get("bands", []), selected_bands=None)
 
         self._update_chart()
         self._update_stats()
@@ -1553,15 +1556,16 @@ class TimeSeriesChartDialog(QWidget):
                 f"Dataset: {asset_id}"
             )
 
-        # Populate band list from first location
-        self.band_list.clear()
+        # Preserve the user's current band selection when adding more locations.
+        # A fresh chart selects all bands; after that, new points should honor
+        # whatever bands are already selected in the panel, including none.
+        had_existing_band_list = self.band_list.count() > 0
+        previous_selection = set(self._get_selected_bands())
         if multi_data:
             first_data = list(multi_data.values())[0]
             bands = first_data.get("bands", [])
-            for band in bands:
-                item = QListWidgetItem(band)
-                self.band_list.addItem(item)
-                item.setSelected(True)
+            selected_bands = previous_selection if had_existing_band_list else None
+            self._populate_band_list(bands, selected_bands=selected_bands)
 
         self._update_chart()
         self._update_stats()
@@ -1570,6 +1574,63 @@ class TimeSeriesChartDialog(QWidget):
         """Get list of selected band names."""
         return [item.text() for item in self.band_list.selectedItems()]
 
+    def _populate_band_list(self, bands, selected_bands=None):
+        """Populate band list, preserving selection when provided.
+
+        Args:
+            bands: Available band names.
+            selected_bands: Previously selected band names. ``None`` means this
+                is an initial load and all available bands should be selected.
+                An empty set means the user cleared selection and it should stay
+                empty.
+        """
+        select_all = selected_bands is None
+        selected_bands = set(selected_bands or [])
+
+        self.band_list.blockSignals(True)
+        try:
+            self.band_list.clear()
+            for band in bands:
+                item = QListWidgetItem(band)
+                self.band_list.addItem(item)
+                item.setSelected(select_all or band in selected_bands)
+        finally:
+            self.band_list.blockSignals(False)
+
+    def _on_band_selection_changed(self):
+        """Refresh chart and statistics when selected bands change."""
+        self._update_chart()
+        self._update_stats()
+
+    def _clear_selected_bands(self):
+        """Clear all selected bands from the chart."""
+        self.band_list.blockSignals(True)
+        try:
+            for index in range(self.band_list.count()):
+                self.band_list.item(index).setSelected(False)
+        finally:
+            self.band_list.blockSignals(False)
+        self._on_band_selection_changed()
+
+    def _clear_chart_display(self, message="No bands selected."):
+        """Clear the chart area and show a short empty-state message."""
+        if self._has_matplotlib:
+            self.figure.clear()
+            ax = self.figure.add_subplot(111)
+            ax.text(0.5, 0.5, message, ha="center", va="center", transform=ax.transAxes)
+            ax.set_axis_off()
+            self.canvas.draw()
+        elif hasattr(self, "text_display"):
+            self.text_display.setText(message)
+
+    @staticmethod
+    def _band_color_map(bands, plt):
+        """Return deterministic, visually distinct colors keyed by band name."""
+        if not bands:
+            return {}
+        cmap = plt.get_cmap("tab20" if len(bands) > 10 else "tab10")
+        return {band: cmap(index % cmap.N) for index, band in enumerate(bands)}
+
     def _update_chart(self):
         """Update the chart with current data and options."""
         if self._is_multi_location and self._multi_data:
@@ -1577,6 +1638,7 @@ class TimeSeriesChartDialog(QWidget):
         elif self._data:
             selected_bands = self._get_selected_bands()
             if not selected_bands:
+                self._clear_chart_display()
                 return
 
             dates = self._data.get("dates", [])
@@ -1594,6 +1656,7 @@ class TimeSeriesChartDialog(QWidget):
 
         selected_bands = self._get_selected_bands()
         if not selected_bands:
+            self._clear_chart_display()
             return
 
         from datetime import datetime
@@ -1601,6 +1664,7 @@ class TimeSeriesChartDialog(QWidget):
         import matplotlib.dates as mdates
 
         self.figure.clear()
+        band_colors = self._band_color_map(selected_bands, plt)
 
         # Check if stacked (subplots) mode
         if self.stack_lines_check.isChecked() and len(selected_bands) > 1:
@@ -1612,7 +1676,7 @@ class TimeSeriesChartDialog(QWidget):
 
             for band_idx, (band, ax) in enumerate(zip(selected_bands, axes)):
                 # Plot each location for this band
-                for loc_id, data in self._multi_data.items():
+                for loc_idx, (loc_id, data) in enumerate(self._multi_data.items()):
                     dates = data.get("dates", [])
                     values = data.get("values", {})
                     metadata = data.get("metadata", {})
@@ -1638,24 +1702,16 @@ class TimeSeriesChartDialog(QWidget):
 
                     valid_dates, valid_values = zip(*valid_points)
 
-                    # Get color from location
-                    color = data.get("location_color")
-                    if color:
-                        color = (
-                            color.red() / 255,
-                            color.green() / 255,
-                            color.blue() / 255,
-                        )
-                    else:
-                        color = plt.cm.tab10.colors[loc_id % 10]
+                    color = band_colors.get(band, plt.cm.tab10.colors[band_idx % 10])
 
                     label = f"Loc {loc_id} ({metadata.get('lon', 0):.2f}, {metadata.get('lat', 0):.2f})"
 
                     if self.interpolate_check.isChecked():
+                        linestyle = ["-", "--", ":", "-."][loc_idx % 4]
                         ax.plot(
                             valid_dates,
                             valid_values,
-                            "-",
+                            linestyle,
                             color=color,
                             label=label,
                             linewidth=1.5,
@@ -1681,7 +1737,7 @@ class TimeSeriesChartDialog(QWidget):
             # Single plot with all bands and locations
             ax = self.figure.add_subplot(111)
 
-            for loc_id, data in self._multi_data.items():
+            for loc_idx, (loc_id, data) in enumerate(self._multi_data.items()):
                 dates = data.get("dates", [])
                 values = data.get("values", {})
                 metadata = data.get("metadata", {})
@@ -1691,17 +1747,6 @@ class TimeSeriesChartDialog(QWidget):
                     date_objects = [datetime.strptime(d, "%Y-%m-%d") for d in dates]
                 except Exception:
                     date_objects = list(range(len(dates)))
-
-                # Get base color from location
-                base_color = data.get("location_color")
-                if base_color:
-                    base_rgb = (
-                        base_color.red() / 255,
-                        base_color.green() / 255,
-                        base_color.blue() / 255,
-                    )
-                else:
-                    base_rgb = plt.cm.tab10.colors[loc_id % 10]
 
                 for band_idx, band in enumerate(selected_bands):
                     band_values = values.get(band, [])
@@ -1719,13 +1764,12 @@ class TimeSeriesChartDialog(QWidget):
 
                     valid_dates, valid_values = zip(*valid_points)
 
-                    # Vary color slightly for different bands at same location
-                    color = base_rgb
+                    color = band_colors.get(band, plt.cm.tab10.colors[band_idx % 10])
 
                     label = f"Loc {loc_id} - {band}"
 
                     if self.interpolate_check.isChecked():
-                        linestyle = ["-", "--", ":", "-."][band_idx % 4]
+                        linestyle = ["-", "--", ":", "-."][loc_idx % 4]
                         ax.plot(
                             valid_dates,
                             valid_values,
@@ -1767,7 +1811,6 @@ class TimeSeriesChartDialog(QWidget):
         from datetime import datetime
         import matplotlib.pyplot as plt
         import matplotlib.dates as mdates
-        import random
 
         self.figure.clear()
 
@@ -1780,14 +1823,7 @@ class TimeSeriesChartDialog(QWidget):
         metadata = self._data.get("metadata", {})
         asset_id = metadata.get("asset_id", "").split("/")[-1]
 
-        # Generate visually distinct, deterministic colors for each band.
-        # random is seeded with a constant; this is for visualization only,
-        # not for any security or cryptographic purpose.
-        random.seed(42)
-        colors = [
-            (random.random(), random.random(), random.random())  # nosec B311
-            for _ in range(len(selected_bands))
-        ]
+        colors = self._band_color_map(selected_bands, plt)
 
         # Check if stacked (subplots) mode
         if self.stack_lines_check.isChecked() and len(selected_bands) > 1:
@@ -1811,7 +1847,7 @@ class TimeSeriesChartDialog(QWidget):
                     continue
 
                 valid_dates, valid_values = zip(*valid_points)
-                color = colors[i]
+                color = colors.get(band, plt.cm.tab10.colors[i % 10])
 
                 # Plot line if interpolate is checked
                 if self.interpolate_check.isChecked():
@@ -1853,7 +1889,7 @@ class TimeSeriesChartDialog(QWidget):
                     continue
 
                 valid_dates, valid_values = zip(*valid_points)
-                color = colors[i]
+                color = colors.get(band, plt.cm.tab10.colors[i % 10])
 
                 # Plot line if interpolate is checked
                 if self.interpolate_check.isChecked():
@@ -2354,6 +2390,8 @@ class PixelTimeSeriesMapTool:
                 self.setCursor(Qt.CursorShape.CrossCursor)
 
             def canvasReleaseEvent(self, event):
+                if not callable(self.callback):
+                    return
                 # Get click coordinates
                 point = self.toMapCoordinates(event.pos())
 
@@ -2410,6 +2448,8 @@ class InspectorMapTool:
                 self.setCursor(Qt.CursorShape.CrossCursor)
 
             def canvasReleaseEvent(self, event):
+                if not callable(self.callback):
+                    return
                 # Get click coordinates
                 point = self.toMapCoordinates(event.pos())
 
@@ -2429,7 +2469,14 @@ class InspectorMapTool:
                     )
                     point = transform.transform(point)
 
-                self.callback(point.x(), point.y())
+                try:
+                    self.callback(point.x(), point.y())
+                except RuntimeError as exc:
+                    QgsMessageLog.logMessage(
+                        f"Ignoring Inspector click after dock cleanup: {exc}",
+                        "GEE Data Catalogs",
+                        Qgis.MessageLevel.Warning,
+                    )
 
         self.tool = ClickTool(iface.mapCanvas(), inspector_callback)
 
@@ -2443,7 +2490,10 @@ class InspectorMapTool:
         """Deactivate the map tool."""
         from qgis.utils import iface
 
-        iface.mapCanvas().unsetMapTool(self.tool)
+        try:
+            iface.mapCanvas().unsetMapTool(self.tool)
+        finally:
+            self.tool.callback = None
 
 
 class CatalogDockWidget(QDockWidget):
@@ -2465,13 +2515,19 @@ class CatalogDockWidget(QDockWidget):
         self._image_list_thread = None
         self._preview_thread = None
         self._thumbnail_thread = None
+        self._saved_thumbnail_thread = None
         self._current_collection = None
         self._filtered_collection = None
         self._current_info_html = ""
+        self._saved_info_html = ""
         self._inspector_thread = None
         self._inspector_map_tool = None
         self._inspector_active = False
+        self._inspector_shutting_down = False
         self._js_code_cache = None  # Cache for f.json JavaScript code snippets
+        self._export_queue = []
+        self._current_export_job = None
+        self._running_export_queue = False
 
         # Time series related attributes
         self._timeseries_thread = None
@@ -2551,6 +2607,14 @@ class CatalogDockWidget(QDockWidget):
         self.search_tab = self._create_search_tab()
         self.tab_widget.addTab(self.search_tab, "Search")
 
+        # Favorites / Recents tab
+        self.favorites_tab = self._create_favorites_tab()
+        self.tab_widget.addTab(self.favorites_tab, "Favorites")
+
+        # Recipes tab
+        self.recipes_tab = self._create_recipes_tab()
+        self.tab_widget.addTab(self.recipes_tab, "Recipes")
+
         # Time Series tab
         self.timeseries_tab = self._create_timeseries_tab()
         self.tab_widget.addTab(self.timeseries_tab, "Time Series")
@@ -2570,6 +2634,10 @@ class CatalogDockWidget(QDockWidget):
         # Inspector tab
         self.inspector_tab = self._create_inspector_tab()
         self.tab_widget.addTab(self.inspector_tab, "Inspector")
+
+        # Project reproducibility tab
+        self.project_tab = self._create_project_tab()
+        self.tab_widget.addTab(self.project_tab, "Project")
 
         # Export tab
         self.export_tab = self._create_export_tab()
@@ -2965,6 +3033,37 @@ class CatalogDockWidget(QDockWidget):
             return self._load_drawn_bbox
         return None
 
+    def _configure_tree_columns(
+        self,
+        tree,
+        stretch_column=0,
+        resize_to_contents=None,
+        initial_widths=None,
+        min_width=80,
+    ):
+        """Configure QTreeWidget columns for readable tab layouts."""
+        resize_to_contents = set(resize_to_contents or [])
+        initial_widths = initial_widths or {}
+        header = tree.header()
+        resize_mode = getattr(QHeaderView, "ResizeMode", QHeaderView)
+        header.setStretchLastSection(False)
+        header.setMinimumSectionSize(min_width)
+
+        stretch_mode = getattr(resize_mode, "Stretch")
+        resize_contents_mode = getattr(resize_mode, "ResizeToContents")
+        interactive_mode = getattr(resize_mode, "Interactive")
+        for column in range(tree.columnCount()):
+            if column == stretch_column:
+                mode = stretch_mode
+            elif column in resize_to_contents:
+                mode = resize_contents_mode
+            else:
+                mode = interactive_mode
+            header.setSectionResizeMode(column, mode)
+
+        for column, width in initial_widths.items():
+            tree.setColumnWidth(column, width)
+
     def _create_browse_tab(self):
         """Create the browse tab with category tree."""
         widget = QWidget()
@@ -2988,10 +3087,13 @@ class CatalogDockWidget(QDockWidget):
         # Category tree
         self.catalog_tree = QTreeWidget()
         self.catalog_tree.setHeaderLabels(["Dataset", "Type", "Source"])
+        self._configure_tree_columns(
+            self.catalog_tree,
+            stretch_column=0,
+            resize_to_contents=[1, 2],
+            initial_widths={0: 320, 1: 120, 2: 100},
+        )
         self.catalog_tree.setAlternatingRowColors(True)
-        self.catalog_tree.setColumnWidth(0, 220)
-        self.catalog_tree.setColumnWidth(1, 100)
-        self.catalog_tree.setColumnWidth(2, 80)
         self.catalog_tree.itemClicked.connect(self._on_dataset_selected)
         self.catalog_tree.itemDoubleClicked.connect(self._on_dataset_double_clicked)
         splitter.addWidget(self.catalog_tree)
@@ -3017,6 +3119,11 @@ class CatalogDockWidget(QDockWidget):
         self.configure_btn.setEnabled(False)
         self.configure_btn.clicked.connect(self._configure_and_add)
         btn_layout.addWidget(self.configure_btn)
+
+        self.favorite_btn = QPushButton("★ Favorite")
+        self.favorite_btn.setEnabled(False)
+        self.favorite_btn.clicked.connect(self._favorite_current_dataset)
+        btn_layout.addWidget(self.favorite_btn)
 
         info_layout.addLayout(btn_layout)
 
@@ -3085,9 +3192,14 @@ class CatalogDockWidget(QDockWidget):
 
         # Results
         self.search_results = QTreeWidget()
-        self.search_results.setHeaderLabels(["Dataset", "Type", "Source"])
+        self.search_results.setHeaderLabels(["Dataset", "Type", "Source", "Score"])
+        self._configure_tree_columns(
+            self.search_results,
+            stretch_column=0,
+            resize_to_contents=[1, 2, 3],
+            initial_widths={0: 320, 1: 120, 2: 100, 3: 80},
+        )
         self.search_results.setAlternatingRowColors(True)
-        self.search_results.setColumnWidth(0, 200)
         self.search_results.itemClicked.connect(self._on_search_result_selected)
         self.search_results.itemDoubleClicked.connect(
             self._on_search_result_double_clicked
@@ -3117,6 +3229,10 @@ class CatalogDockWidget(QDockWidget):
         self.search_configure_btn.clicked.connect(self._configure_search_result)
         search_btn_layout.addWidget(self.search_configure_btn)
 
+        self.search_favorite_btn = QPushButton("★ Favorite")
+        self.search_favorite_btn.clicked.connect(self._favorite_current_dataset)
+        search_btn_layout.addWidget(self.search_favorite_btn)
+
         search_info_layout.addLayout(search_btn_layout)
 
         # Second row of buttons for Time Series
@@ -3134,6 +3250,153 @@ class CatalogDockWidget(QDockWidget):
 
         splitter.setSizes([250, 250])
 
+        return widget
+
+    def _create_favorites_tab(self):
+        """Create the favorites and recent datasets tab."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        tabs = QTabWidget()
+        layout.addWidget(tabs)
+
+        favorites_widget = QWidget()
+        favorites_layout = QVBoxLayout(favorites_widget)
+        self.favorites_tree = QTreeWidget()
+        self.favorites_tree.setHeaderLabels(["Dataset", "Type", "Source"])
+        self._configure_tree_columns(
+            self.favorites_tree,
+            stretch_column=0,
+            resize_to_contents=[1, 2],
+            initial_widths={0: 320, 1: 120, 2: 100},
+        )
+        self.favorites_tree.setAlternatingRowColors(True)
+        self.favorites_tree.itemClicked.connect(self._on_saved_dataset_selected)
+        self.favorites_tree.itemDoubleClicked.connect(
+            self._on_saved_dataset_double_clicked
+        )
+        self.favorites_tree.installEventFilter(self)
+        favorites_layout.addWidget(self.favorites_tree)
+        tabs.addTab(favorites_widget, "Favorites")
+
+        recents_widget = QWidget()
+        recents_layout = QVBoxLayout(recents_widget)
+        self.recents_tree = QTreeWidget()
+        self.recents_tree.setHeaderLabels(["Dataset", "Type", "Last Action"])
+        self._configure_tree_columns(
+            self.recents_tree,
+            stretch_column=0,
+            resize_to_contents=[1, 2],
+            initial_widths={0: 320, 1: 120, 2: 130},
+        )
+        self.recents_tree.setAlternatingRowColors(True)
+        self.recents_tree.itemClicked.connect(self._on_saved_dataset_selected)
+        self.recents_tree.itemDoubleClicked.connect(
+            self._on_saved_dataset_double_clicked
+        )
+        recents_layout.addWidget(self.recents_tree)
+        tabs.addTab(recents_widget, "Recent")
+
+        self.saved_dataset_info = QTextBrowser()
+        self.saved_dataset_info.setOpenExternalLinks(True)
+        self.saved_dataset_info.setPlaceholderText("Select a saved dataset...")
+        layout.addWidget(self.saved_dataset_info)
+
+        btn_layout = QHBoxLayout()
+        self.saved_add_btn = QPushButton("Add to Map")
+        self.saved_add_btn.clicked.connect(self._add_saved_dataset_to_map)
+        btn_layout.addWidget(self.saved_add_btn)
+
+        self.saved_configure_btn = QPushButton("Configure")
+        self.saved_configure_btn.clicked.connect(self._configure_saved_dataset)
+        btn_layout.addWidget(self.saved_configure_btn)
+
+        self.saved_timeseries_btn = QPushButton("📈 Time Series")
+        self.saved_timeseries_btn.setEnabled(False)
+        self.saved_timeseries_btn.setToolTip(
+            "Configure and create time series from this saved dataset"
+        )
+        self.saved_timeseries_btn.clicked.connect(self._configure_saved_timeseries)
+        btn_layout.addWidget(self.saved_timeseries_btn)
+
+        self.saved_remove_btn = QPushButton("Remove Favorite")
+        self.saved_remove_btn.setEnabled(False)
+        self.saved_remove_btn.setToolTip(
+            "Select a dataset in Favorites, then click to remove it."
+        )
+        self.saved_remove_btn.clicked.connect(self._remove_selected_favorite)
+        btn_layout.addWidget(self.saved_remove_btn)
+
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.clicked.connect(self._refresh_saved_datasets)
+        btn_layout.addWidget(refresh_btn)
+        layout.addLayout(btn_layout)
+
+        self._saved_dataset = None
+        self._saved_dataset_is_favorite = False
+        self._refresh_saved_datasets()
+        return widget
+
+    def _create_recipes_tab(self):
+        """Create a tab with reusable Earth Engine workflow recipes."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        self.recipe_tree = QTreeWidget()
+        self.recipe_tree.setHeaderLabels(["Recipe", "Category", "Target"])
+        self._configure_tree_columns(
+            self.recipe_tree,
+            stretch_column=0,
+            resize_to_contents=[1, 2],
+            initial_widths={0: 420, 1: 180, 2: 90},
+        )
+        self.recipe_tree.setAlternatingRowColors(True)
+        self.recipe_tree.itemClicked.connect(self._on_recipe_selected)
+        self.recipe_tree.itemDoubleClicked.connect(self._apply_selected_recipe)
+        layout.addWidget(self.recipe_tree)
+
+        self.recipe_info = QTextBrowser()
+        self.recipe_info.setPlaceholderText("Select a recipe...")
+        layout.addWidget(self.recipe_info)
+
+        btn_layout = QHBoxLayout()
+        apply_btn = QPushButton("Apply Recipe")
+        apply_btn.clicked.connect(self._apply_selected_recipe)
+        btn_layout.addWidget(apply_btn)
+
+        code_btn = QPushButton("Copy Code")
+        code_btn.clicked.connect(self._copy_selected_recipe_code)
+        btn_layout.addWidget(code_btn)
+        layout.addLayout(btn_layout)
+
+        self._selected_recipe = None
+        self._populate_recipes()
+        return widget
+
+    def _create_project_tab(self):
+        """Create a reproducibility snapshot tab for current project state."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        self.project_snapshot_text = QTextBrowser()
+        self.project_snapshot_text.setOpenExternalLinks(True)
+        layout.addWidget(self.project_snapshot_text)
+
+        btn_layout = QHBoxLayout()
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.clicked.connect(self._refresh_project_snapshot)
+        btn_layout.addWidget(refresh_btn)
+
+        copy_btn = QPushButton("Copy Markdown")
+        copy_btn.clicked.connect(self._copy_project_snapshot)
+        btn_layout.addWidget(copy_btn)
+
+        ai_btn = QPushButton("Open AI with Context")
+        ai_btn.clicked.connect(self._open_ai_with_project_context)
+        btn_layout.addWidget(ai_btn)
+        layout.addLayout(btn_layout)
+
+        QTimer.singleShot(0, self._refresh_project_snapshot)
         return widget
 
     def _create_timeseries_tab(self):
@@ -4604,9 +4867,13 @@ class CatalogDockWidget(QDockWidget):
 
         self.inspector_tree = QTreeWidget()
         self.inspector_tree.setHeaderLabels(["Property", "Value"])
+        self._configure_tree_columns(
+            self.inspector_tree,
+            stretch_column=1,
+            resize_to_contents=[0],
+            initial_widths={0: 220, 1: 320},
+        )
         self.inspector_tree.setAlternatingRowColors(True)
-        self.inspector_tree.setColumnWidth(0, 200)
-        self.inspector_tree.header().setStretchLastSection(True)
         layout.addWidget(self.inspector_tree)
 
         # Progress bar
@@ -4795,6 +5062,14 @@ class CatalogDockWidget(QDockWidget):
         self.export_btn.setStyleSheet("font-weight: bold;")
         btn_layout.addWidget(self.export_btn)
 
+        queue_btn = QPushButton("Add to Queue")
+        queue_btn.clicked.connect(self._add_export_to_queue)
+        btn_layout.addWidget(queue_btn)
+
+        run_queue_btn = QPushButton("Run Queue")
+        run_queue_btn.clicked.connect(self._run_export_queue)
+        btn_layout.addWidget(run_queue_btn)
+
         layout.addLayout(btn_layout)
 
         # Progress bar
@@ -4808,12 +5083,17 @@ class CatalogDockWidget(QDockWidget):
         self.export_status_label.setStyleSheet("color: gray; font-size: 10px;")
         layout.addWidget(self.export_status_label)
 
+        self.export_history_list = QListWidget()
+        self.export_history_list.setMaximumHeight(110)
+        layout.addWidget(self.export_history_list)
+
         # Add stretch to push everything up
         layout.addStretch()
 
         # Initialize layer lists
         self._refresh_export_layers()
         self._refresh_vector_layers()
+        self._refresh_export_history()
 
         return widget
 
@@ -5151,14 +5431,100 @@ class CatalogDockWidget(QDockWidget):
             QgsGeometry.fromPolygonXY([points]), None
         )
 
-    def _do_export(self):
-        """Perform the export operation using a background thread."""
-        from ..core.ee_utils import get_ee_layers
-
+    def _collect_export_job(self):
+        """Collect current export UI settings into a serializable job."""
         layer_name = self.export_layer_combo.currentText()
         if layer_name.startswith("--"):
             QMessageBox.warning(self, "Error", "Please select a valid EE layer.")
+            return None
+        return {
+            "layer_name": layer_name,
+            "scale": self.export_scale_spin.value(),
+            "crs": self.export_crs_edit.text().strip() or "EPSG:3857",
+            "vector_format": self.export_format_combo.currentText(),
+            "output_path": self.export_output_edit.text().strip(),
+            "region_mode": self.export_region_btn_group.checkedId(),
+            "custom_bounds": self.export_bounds_edit.text().strip(),
+            "drawn_bounds": self._export_drawn_bounds,
+            "vector_layer": self.export_vector_combo.currentText(),
+        }
+
+    def _add_export_to_queue(self):
+        job = self._collect_export_job()
+        if not job:
             return
+        self._export_queue.append(job)
+        self._refresh_export_history()
+        self.export_status_label.setText(
+            f"Queued {len(self._export_queue)} export job(s)."
+        )
+
+    def _run_export_queue(self):
+        if not self._export_queue:
+            self.export_status_label.setText("Export queue is empty.")
+            return
+        if (
+            getattr(self, "_export_thread", None) is not None
+            and self._export_thread.isRunning()
+        ):
+            self.export_status_label.setText("An export is already running.")
+            return
+        self._running_export_queue = True
+        self._run_next_export_job()
+
+    def _run_next_export_job(self):
+        if not self._export_queue:
+            self._running_export_queue = False
+            self._current_export_job = None
+            self.export_status_label.setText("Export queue complete.")
+            return
+        job = self._export_queue.pop(0)
+        self._apply_export_job_to_ui(job)
+        self._do_export(from_queue=True)
+
+    def _apply_export_job_to_ui(self, job):
+        index = self.export_layer_combo.findText(job.get("layer_name", ""))
+        if index >= 0:
+            self.export_layer_combo.setCurrentIndex(index)
+        self.export_scale_spin.setValue(int(job.get("scale", 30)))
+        self.export_crs_edit.setText(job.get("crs", "EPSG:3857"))
+        fmt_index = self.export_format_combo.findText(
+            job.get("vector_format", "GeoJSON")
+        )
+        if fmt_index >= 0:
+            self.export_format_combo.setCurrentIndex(fmt_index)
+        self.export_output_edit.setText(job.get("output_path", ""))
+        region_mode = int(job.get("region_mode", 0))
+        button = self.export_region_btn_group.button(region_mode)
+        if button:
+            button.setChecked(True)
+        self.export_bounds_edit.setText(job.get("custom_bounds", ""))
+        self._export_drawn_bounds = job.get("drawn_bounds")
+
+    def _refresh_export_history(self):
+        """Render queued jobs and persisted export history."""
+        if not hasattr(self, "export_history_list"):
+            return
+        from ..core.user_state import get_export_history
+
+        self.export_history_list.clear()
+        for idx, job in enumerate(self._export_queue, start=1):
+            self.export_history_list.addItem(
+                f"Queued {idx}: {job.get('layer_name', '')} -> {job.get('output_path') or '(temporary)'}"
+            )
+        for job in get_export_history()[:10]:
+            self.export_history_list.addItem(
+                f"{job.get('status', '')}: {job.get('layer_name', '')} -> {job.get('output_path', '')}"
+            )
+
+    def _do_export(self, from_queue=False):
+        """Perform the export operation using a background thread."""
+        from ..core.ee_utils import get_ee_layers
+
+        job = self._collect_export_job()
+        if not job:
+            return
+        layer_name = job["layer_name"]
 
         ee_layers = get_ee_layers()
         if layer_name not in ee_layers:
@@ -5173,9 +5539,9 @@ class CatalogDockWidget(QDockWidget):
             return
 
         # Get options
-        scale = self.export_scale_spin.value()
-        crs = self.export_crs_edit.text().strip() or "EPSG:3857"
-        vector_format = self.export_format_combo.currentText()
+        scale = job["scale"]
+        crs = job["crs"]
+        vector_format = job["vector_format"]
 
         # Determine export type
         type_name = type(ee_object).__name__
@@ -5197,12 +5563,16 @@ class CatalogDockWidget(QDockWidget):
             QMessageBox.warning(self, "Error", f"Unsupported object type: {type_name}")
             return
 
-        output_path = self.export_output_edit.text().strip()
+        output_path = job.get("output_path", "")
         if not output_path:
             output_path = self._generate_temp_export_path(
                 export_type=export_type, vector_format=vector_format
             )
             self.export_output_edit.setText(output_path)
+        job["output_path"] = output_path
+        job["export_type"] = export_type
+        job["from_queue"] = from_queue
+        self._current_export_job = job
 
         # Show progress
         self._start_export_progress()
@@ -5237,14 +5607,22 @@ class CatalogDockWidget(QDockWidget):
         self.export_btn.setEnabled(True)
         self.export_status_label.setText(f"Exported to: {output_path}")
         self.export_status_label.setStyleSheet("color: green; font-size: 10px;")
+        if self._current_export_job:
+            from ..core.user_state import record_export_job
+
+            self._current_export_job["output_path"] = output_path
+            record_export_job(self._current_export_job, "success", output_path)
+            self._refresh_export_history()
 
         # Ask if user wants to add to map
-        reply = QMessageBox.question(
-            self,
-            "Export Complete",
-            f"Export successful!\n{output_path}\n\nAdd layer to map?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
+        reply = QMessageBox.StandardButton.No
+        if not self._running_export_queue:
+            reply = QMessageBox.question(
+                self,
+                "Export Complete",
+                f"Export successful!\n{output_path}\n\nAdd layer to map?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
         if reply == QMessageBox.StandardButton.Yes:
             layer_name = os.path.splitext(os.path.basename(output_path))[0]
             if output_path.lower().endswith(".tif"):
@@ -5258,6 +5636,8 @@ class CatalogDockWidget(QDockWidget):
 
             if layer.isValid():
                 QgsProject.instance().addMapLayer(layer)
+        if self._running_export_queue:
+            QTimer.singleShot(0, self._run_next_export_job)
 
     def _on_export_error(self, error_message):
         """Handle export error."""
@@ -5265,7 +5645,14 @@ class CatalogDockWidget(QDockWidget):
         self.export_btn.setEnabled(True)
         self.export_status_label.setText("Export failed!")
         self.export_status_label.setStyleSheet("color: red; font-size: 10px;")
+        if self._current_export_job:
+            from ..core.user_state import record_export_job
+
+            record_export_job(self._current_export_job, "error", error_message)
+            self._refresh_export_history()
         QMessageBox.critical(self, "Export Error", f"Export failed:\n{error_message}")
+        if self._running_export_queue:
+            QTimer.singleShot(0, self._run_next_export_job)
 
     def _start_export_progress(self):
         """Start an indeterminate progress indicator for export."""
@@ -5567,10 +5954,26 @@ class CatalogDockWidget(QDockWidget):
         elif current_widget == getattr(self, "export_tab", None):
             self._refresh_export_layers()
             self._refresh_vector_layers()
+            self._refresh_export_history()
+        elif current_widget == getattr(self, "favorites_tab", None):
+            self._refresh_saved_datasets()
+        elif current_widget == getattr(self, "project_tab", None):
+            self._refresh_project_snapshot()
 
         plugin = getattr(self, "plugin", None)
         if plugin is not None and hasattr(plugin, "_sync_panel_actions"):
             plugin._sync_panel_actions()
+
+    def eventFilter(self, obj, event):
+        """Handle keyboard shortcuts for dock child widgets."""
+        key_press = getattr(getattr(QEvent, "Type", QEvent), "KeyPress")
+        if obj is getattr(self, "favorites_tree", None) and event.type() == key_press:
+            delete_key = getattr(getattr(Qt, "Key", Qt), "Key_Delete")
+            backspace_key = getattr(getattr(Qt, "Key", Qt), "Key_Backspace")
+            if event.key() in {delete_key, backspace_key}:
+                self._remove_selected_favorite()
+                return True
+        return super().eventFilter(obj, event)
 
     def show_ai_assistant_tab(self):
         """Backward-compatible entry point for opening OpenGeoAgent chat."""
@@ -5592,6 +5995,365 @@ class CatalogDockWidget(QDockWidget):
             and self._selected_dataset.get("id") != asset_id.strip()
         ):
             self._selected_dataset = None
+
+    def _saved_dataset_item(self, dataset):
+        """Create a tree item for a favorite/recent dataset."""
+        item = QTreeWidgetItem(
+            [
+                dataset.get("name", dataset.get("id", "Unknown"))[:55],
+                dataset.get("type", "Unknown"),
+                dataset.get("source", dataset.get("last_action", "")),
+            ]
+        )
+        item.setData(0, Qt.ItemDataRole.UserRole, dataset)
+        item.setToolTip(0, dataset.get("id", ""))
+        return item
+
+    def _refresh_saved_datasets(self):
+        """Reload favorites and recents from settings."""
+        try:
+            from ..core.user_state import get_favorites, get_recents
+
+            self.favorites_tree.clear()
+            for dataset in get_favorites():
+                self.favorites_tree.addTopLevelItem(self._saved_dataset_item(dataset))
+
+            self.recents_tree.clear()
+            for dataset in get_recents():
+                item = QTreeWidgetItem(
+                    [
+                        dataset.get("name", dataset.get("id", "Unknown"))[:55],
+                        dataset.get("type", "Unknown"),
+                        dataset.get("last_action", ""),
+                    ]
+                )
+                item.setData(0, Qt.ItemDataRole.UserRole, dataset)
+                item.setToolTip(0, dataset.get("id", ""))
+                self.recents_tree.addTopLevelItem(item)
+            if self._saved_dataset and not any(
+                item.get("id") == self._saved_dataset.get("id")
+                for item in get_favorites()
+            ):
+                self._saved_dataset_is_favorite = False
+                self.saved_remove_btn.setEnabled(False)
+        except Exception as exc:
+            self._show_error(f"Failed to refresh saved datasets: {exc}")
+
+    def _on_saved_dataset_selected(self, item, _column):
+        """Show details for a favorite or recent dataset."""
+        dataset = item.data(0, Qt.ItemDataRole.UserRole)
+        self._saved_dataset = dataset
+        self._saved_dataset_is_favorite = item.treeWidget() is self.favorites_tree
+        self.saved_remove_btn.setEnabled(
+            bool(dataset and self._saved_dataset_is_favorite)
+        )
+        is_image_collection = (
+            str(dataset.get("type", "")).lower() == "imagecollection"
+            if dataset
+            else False
+        )
+        self.saved_timeseries_btn.setEnabled(is_image_collection)
+        if dataset:
+            self._show_saved_dataset_info(dataset)
+
+    def _on_saved_dataset_double_clicked(self, item, _column):
+        dataset = item.data(0, Qt.ItemDataRole.UserRole)
+        if dataset:
+            self._add_dataset_to_map(dataset)
+
+    def _add_saved_dataset_to_map(self):
+        if self._saved_dataset:
+            self._add_dataset_to_map(self._saved_dataset)
+
+    def _configure_saved_dataset(self):
+        if not self._saved_dataset:
+            return
+        self._selected_dataset = self._saved_dataset
+        self._configure_and_add()
+
+    def _configure_saved_timeseries(self):
+        if not self._saved_dataset:
+            return
+        self._selected_dataset = self._saved_dataset
+        self._configure_timeseries()
+
+    def _remove_selected_favorite(self):
+        if not self._saved_dataset or not self._saved_dataset_is_favorite:
+            return
+        from ..core.user_state import remove_favorite
+
+        dataset_name = self._saved_dataset.get(
+            "name", self._saved_dataset.get("id", "dataset")
+        )
+        remove_favorite(self._saved_dataset.get("id", ""))
+        self._saved_dataset = None
+        self._saved_dataset_is_favorite = False
+        self._refresh_saved_datasets()
+        self.saved_dataset_info.clear()
+        self.saved_remove_btn.setEnabled(False)
+        self.saved_timeseries_btn.setEnabled(False)
+        self._show_success(f"Removed favorite: {dataset_name}")
+
+    def _favorite_current_dataset(self):
+        """Add the currently selected dataset to Favorites."""
+        if not self._selected_dataset:
+            return
+        from ..core.user_state import add_favorite
+
+        add_favorite(self._selected_dataset)
+        self._refresh_saved_datasets()
+        self._show_success("Added dataset to Favorites.")
+
+    def _dataset_info_html(self, dataset):
+        """Return compact dataset details as HTML."""
+        source_badge = (
+            f"<span style='background-color: {'#4285F4' if dataset.get('source') == 'official' else '#34A853'}; "
+            f"color: white; padding: 2px 6px; border-radius: 3px; font-size: 10px;'>"
+            f"{dataset.get('source', 'unknown').upper()}</span>"
+        )
+        info_lines = [
+            source_badge,
+            f"<b>Name:</b> {dataset.get('name', dataset.get('title', 'Unknown'))}",
+            f"<b>ID:</b> <code>{dataset.get('id', 'Unknown')}</code>",
+            f"<b>Type:</b> {dataset.get('type', 'Unknown')}",
+            f"<b>Provider:</b> {dataset.get('provider', 'Unknown')}",
+        ]
+        if dataset.get("_search_score") is not None:
+            info_lines.append(f"<b>Search score:</b> {dataset.get('_search_score')}")
+        if dataset.get("thumbnail"):
+            info_lines.append(
+                "<div id='saved-thumbnail-placeholder'><i>Loading thumbnail...</i></div>"
+            )
+        if dataset.get("description"):
+            info_lines.append(
+                f"<b>Description:</b><br>{dataset.get('description', '')[:500]}..."
+            )
+        if dataset.get("start_date"):
+            info_lines.append(f"<b>Start Date:</b> {dataset['start_date']}")
+        if dataset.get("end_date"):
+            info_lines.append(f"<b>End Date:</b> {dataset['end_date']}")
+        for label, key in (("URL", "url"), ("Docs", "docs"), ("Script", "script")):
+            if dataset.get(key):
+                value = dataset[key]
+                info_lines.append(f"<b>{label}:</b> <a href='{value}'>{value}</a>")
+        return "<br>".join(info_lines)
+
+    def _show_saved_dataset_info(self, dataset):
+        """Render favorite/recent dataset details and load its thumbnail."""
+        if self._saved_thumbnail_thread and self._saved_thumbnail_thread.isRunning():
+            self._saved_thumbnail_thread.terminate()
+            self._saved_thumbnail_thread.wait()
+
+        self._saved_info_html = self._dataset_info_html(dataset)
+        self.saved_dataset_info.setHtml(self._saved_info_html)
+
+        thumbnail_url = dataset.get("thumbnail", "")
+        if thumbnail_url:
+            self._saved_thumbnail_thread = ThumbnailLoaderThread(thumbnail_url)
+            self._saved_thumbnail_thread.finished.connect(
+                self._on_saved_thumbnail_loaded
+            )
+            self._saved_thumbnail_thread.error.connect(self._on_saved_thumbnail_error)
+            self._saved_thumbnail_thread.start()
+
+    def _on_saved_thumbnail_loaded(self, img_data_url):
+        """Handle favorite/recent thumbnail loaded successfully."""
+        thumbnail_html = (
+            f"<br><img src='{img_data_url}' width='300' "
+            "style='border: 1px solid #ccc; border-radius: 4px;'><br>"
+        )
+        self._saved_info_html = self._saved_info_html.replace(
+            "<div id='saved-thumbnail-placeholder'><i>Loading thumbnail...</i></div>",
+            thumbnail_html,
+        )
+        self.saved_dataset_info.setHtml(self._saved_info_html)
+
+    def _on_saved_thumbnail_error(self, _error):
+        """Remove favorite/recent thumbnail placeholder if loading fails."""
+        self._saved_info_html = self._saved_info_html.replace(
+            "<div id='saved-thumbnail-placeholder'><i>Loading thumbnail...</i></div>",
+            "",
+        )
+        self.saved_dataset_info.setHtml(self._saved_info_html)
+
+    def _populate_recipes(self):
+        """Populate the recipes tree."""
+        from ..core.user_state import get_recipes
+
+        self.recipe_tree.clear()
+        for recipe in get_recipes():
+            item = QTreeWidgetItem(
+                [
+                    recipe.get("name", "Unnamed recipe"),
+                    recipe.get("category", ""),
+                    recipe.get("target", ""),
+                ]
+            )
+            item.setData(0, Qt.ItemDataRole.UserRole, recipe)
+            item.setToolTip(0, recipe.get("asset_id", ""))
+            self.recipe_tree.addTopLevelItem(item)
+
+    def _on_recipe_selected(self, item, _column):
+        recipe = item.data(0, Qt.ItemDataRole.UserRole)
+        self._selected_recipe = recipe
+        if not recipe:
+            return
+        self.recipe_info.setHtml(
+            "<br>".join(
+                [
+                    f"<b>{recipe.get('name', 'Recipe')}</b>",
+                    f"<b>Asset:</b> <code>{recipe.get('asset_id', '')}</code>",
+                    f"<b>Target:</b> {recipe.get('target', '')}",
+                    f"<b>Bands:</b> {recipe.get('bands', '')}",
+                    f"<b>Description:</b><br>{recipe.get('description', '')}",
+                ]
+            )
+        )
+
+    def _recipe_vis_params(self, recipe):
+        vis_params = {}
+        if recipe.get("bands"):
+            vis_params["bands"] = [
+                band.strip() for band in str(recipe["bands"]).split(",") if band.strip()
+            ]
+        for key in ("min", "max"):
+            if recipe.get(key) is not None:
+                vis_params[key] = recipe[key]
+        if recipe.get("palette"):
+            vis_params["palette"] = [
+                color.strip()
+                for color in str(recipe["palette"]).split(",")
+                if color.strip()
+            ]
+        return vis_params
+
+    def _apply_selected_recipe(self):
+        """Apply selected recipe to the Load or Time Series tab."""
+        recipe = self._selected_recipe
+        if not recipe:
+            return
+        asset_id = recipe.get("asset_id", "")
+        name = recipe.get("name", asset_id.split("/")[-1])
+        target = recipe.get("target", "load")
+        if target == "timeseries":
+            self.ts_dataset_id_input.setText(asset_id)
+            self.ts_layer_name_input.setText(name[:50])
+            if recipe.get("bands"):
+                self.ts_bands_input.setText(str(recipe.get("bands")))
+            self.tab_widget.setCurrentWidget(self.timeseries_tab)
+        else:
+            self.dataset_id_input.setText(asset_id)
+            self.layer_name_input.setText(name[:50])
+            if recipe.get("cloud_cover") is not None:
+                self.cloud_cover_spin.setValue(int(recipe["cloud_cover"]))
+            if recipe.get("bands"):
+                self.bands_input.setText(str(recipe.get("bands")))
+            if recipe.get("min") is not None:
+                self.vis_min_input.setText(str(recipe.get("min")))
+            if recipe.get("max") is not None:
+                self.vis_max_input.setText(str(recipe.get("max")))
+            if recipe.get("palette"):
+                self.palette_input.setText(str(recipe.get("palette")))
+            self.tab_widget.setCurrentWidget(self.load_tab)
+        self._show_success(f"Applied recipe: {name}")
+
+    def _selected_recipe_code(self):
+        recipe = self._selected_recipe
+        if not recipe:
+            return ""
+        asset_id = recipe.get("asset_id", "")
+        vis_params = self._recipe_vis_params(recipe)
+        constructor = (
+            "ee.ImageCollection"
+            if recipe.get("type") == "ImageCollection"
+            else "ee.Image"
+        )
+        if recipe.get("type") == "FeatureCollection":
+            constructor = "ee.FeatureCollection"
+        lines = [
+            "import ee",
+            "",
+            f"asset = {constructor}('{asset_id}')",
+        ]
+        if recipe.get("type") == "ImageCollection":
+            lines.append("image = asset.median()")
+        else:
+            lines.append("image = asset")
+        lines.extend(
+            [
+                f"vis_params = {vis_params!r}",
+                "# In QGIS, use the plugin Load tab or qgis_geemap to add this layer.",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _copy_selected_recipe_code(self):
+        code = self._selected_recipe_code()
+        if not code:
+            return
+        QApplication.clipboard().setText(code)
+        self._show_success("Recipe code copied to clipboard.")
+
+    def get_ai_context_snapshot(self):
+        """Return current plugin/project state as Markdown for AI handoff."""
+        from ..core.ee_utils import get_ee_layers
+
+        lines = ["# GEE Data Catalogs Context", ""]
+        if self._selected_dataset:
+            lines.extend(
+                [
+                    "## Selected Dataset",
+                    f"- Name: {self._selected_dataset.get('name', '')}",
+                    f"- Asset ID: {self._selected_dataset.get('id', '')}",
+                    f"- Type: {self._selected_dataset.get('type', '')}",
+                    "",
+                ]
+            )
+        try:
+            extent = self._get_map_extent_wgs84()
+            if extent:
+                lines.extend(
+                    [
+                        "## Current Map Extent",
+                        f"- WGS84 bounds: {extent[0]:.6f}, {extent[1]:.6f}, {extent[2]:.6f}, {extent[3]:.6f}",
+                        "",
+                    ]
+                )
+        except Exception as exc:
+            QgsMessageLog.logMessage(
+                f"Could not include map extent in AI context: {exc}",
+                "GEE Data Catalogs",
+                Qgis.MessageLevel.Warning,
+            )
+        lines.append("## Earth Engine Layers")
+        ee_layers = get_ee_layers()
+        if ee_layers:
+            for name, (_ee_object, vis_params) in ee_layers.items():
+                lines.append(f"- {name}: vis={vis_params}")
+        else:
+            lines.append("- None registered")
+        lines.append("")
+        lines.append("## QGIS Layers")
+        for layer in QgsProject.instance().mapLayers().values():
+            lines.append(f"- {layer.name()} ({layer.type()})")
+        return "\n".join(lines)
+
+    def _refresh_project_snapshot(self):
+        markdown = self.get_ai_context_snapshot()
+        html_text = (
+            markdown.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        )
+        self.project_snapshot_text.setHtml(f"<pre>{html_text}</pre>")
+
+    def _copy_project_snapshot(self):
+        QApplication.clipboard().setText(self.get_ai_context_snapshot())
+        self._show_success("Project snapshot copied to clipboard.")
+
+    def _open_ai_with_project_context(self):
+        QApplication.clipboard().setText(self.get_ai_context_snapshot())
+        plugin = getattr(self, "plugin", None)
+        if plugin is not None and hasattr(plugin, "open_ai_assistant"):
+            plugin.open_ai_assistant(with_context=True)
 
     def _start_catalog_load(self):
         """Start loading catalogs in background."""
@@ -5729,6 +6491,7 @@ class CatalogDockWidget(QDockWidget):
             self._reset_vis_params()
             self.add_map_btn.setEnabled(True)
             self.configure_btn.setEnabled(True)
+            self.favorite_btn.setEnabled(True)
             # Enable time series button only for ImageCollections
             is_image_collection = dataset.get("type", "").lower() == "imagecollection"
             self.timeseries_btn.setEnabled(is_image_collection)
@@ -5739,6 +6502,7 @@ class CatalogDockWidget(QDockWidget):
             self.info_text.clear()
             self.add_map_btn.setEnabled(False)
             self.configure_btn.setEnabled(False)
+            self.favorite_btn.setEnabled(False)
             self.timeseries_btn.setEnabled(False)
 
     def _on_dataset_double_clicked(self, item, _column):
@@ -6073,6 +6837,10 @@ for f in data['features']:
             # Check if we have JavaScript code for this asset
             if self._run_js_code_for_asset(asset_id):
                 name = dataset.get("name", asset_id.split("/")[-1])[:50]
+                from ..core.user_state import record_recent_dataset
+
+                record_recent_dataset(dataset, "load")
+                self._refresh_saved_datasets()
                 self._show_success(f"Added layer: {name} (from sample code)")
                 return
 
@@ -6106,6 +6874,10 @@ for f in data['features']:
 
             # Add layer
             add_ee_layer(ee_object, vis_params, name)
+            from ..core.user_state import record_recent_dataset
+
+            record_recent_dataset(dataset, "load")
+            self._refresh_saved_datasets()
             self._show_success(f"Added layer: {name} ({actual_type})")
 
         except Exception as e:
@@ -6139,6 +6911,7 @@ for f in data['features']:
                         dataset.get("name", dataset.get("id", "Unknown"))[:50],
                         dataset.get("type", "Unknown"),
                         dataset.get("source", "unknown"),
+                        str(dataset.get("_search_score", "")),
                     ]
                 )
                 item.setData(0, Qt.ItemDataRole.UserRole, dataset)
@@ -7409,6 +8182,76 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
                 "No Earth Engine layers registered yet. Add layers using Browse/Search/Load/Code tabs."
             )
 
+    @staticmethod
+    def _qt_object_deleted(obj):
+        """Return True if a wrapped Qt object has already been deleted."""
+        if obj is None:
+            return True
+        try:
+            from qgis.PyQt import sip
+
+            return bool(sip.isdeleted(obj))
+        except Exception:
+            try:
+                obj.objectName()
+            except RuntimeError:
+                return True
+            except Exception:
+                return False
+        return False
+
+    def _inspector_ui_available(self):
+        """Return whether Inspector widgets are still safe to update."""
+        return not any(
+            self._qt_object_deleted(widget)
+            for widget in (
+                self.inspector_lon_label,
+                self.inspector_lat_label,
+                self.inspector_tree,
+                self.inspector_progress_bar,
+                self.inspector_status_label,
+                self.inspector_toggle_btn,
+            )
+        )
+
+    def _set_inspector_status(self, text, style=None):
+        """Safely update Inspector status after async callbacks."""
+        if self._inspector_shutting_down or not self._inspector_ui_available():
+            return
+        self.inspector_status_label.setText(text)
+        if style:
+            self.inspector_status_label.setStyleSheet(style)
+
+    def _shutdown_inspector(self, update_ui=True):
+        """Deactivate Inspector map tool and stop callbacks into this dock."""
+        self._inspector_shutting_down = True
+        if self._inspector_map_tool:
+            try:
+                self._inspector_map_tool.deactivate()
+            except Exception as exc:
+                QgsMessageLog.logMessage(
+                    f"Failed to deactivate Inspector map tool: {exc}",
+                    "GEE Data Catalogs",
+                    Qgis.MessageLevel.Warning,
+                )
+            self._inspector_map_tool = None
+
+        self._inspector_active = False
+
+        if (
+            update_ui
+            and not self._qt_object_deleted(getattr(self, "inspector_toggle_btn", None))
+            and not self._qt_object_deleted(
+                getattr(self, "inspector_status_label", None)
+            )
+        ):
+            self.inspector_toggle_btn.setChecked(False)
+            self.inspector_toggle_btn.setText("▶ Start Inspector")
+            self.inspector_status_label.setText("Inspector stopped.")
+            self.inspector_status_label.setStyleSheet("color: gray; font-size: 10px;")
+
+        self._inspector_shutting_down = False
+
     def _toggle_inspector(self):
         """Toggle the Inspector map tool on/off."""
         # Update layer count when starting inspector
@@ -7430,13 +8273,7 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
             self.inspector_status_label.setStyleSheet("color: blue; font-size: 10px;")
         else:
             # Stop inspector
-            if self._inspector_map_tool:
-                self._inspector_map_tool.deactivate()
-
-            self._inspector_active = False
-            self.inspector_toggle_btn.setText("▶ Start Inspector")
-            self.inspector_status_label.setText("Inspector stopped.")
-            self.inspector_status_label.setStyleSheet("color: gray; font-size: 10px;")
+            self._shutdown_inspector(update_ui=True)
 
     def _clear_inspector(self):
         """Clear inspector results."""
@@ -7449,9 +8286,21 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
 
     def _inspect_point(self, lon, lat):
         """Inspect Earth Engine layers at the clicked point."""
+        if not self._inspector_active or not self._inspector_ui_available():
+            return
+
         # Update location labels
-        self.inspector_lon_label.setText(f"{lon:.6f}")
-        self.inspector_lat_label.setText(f"{lat:.6f}")
+        try:
+            self.inspector_lon_label.setText(f"{lon:.6f}")
+            self.inspector_lat_label.setText(f"{lat:.6f}")
+        except RuntimeError as exc:
+            QgsMessageLog.logMessage(
+                f"Ignoring Inspector click after UI deletion: {exc}",
+                "GEE Data Catalogs",
+                Qgis.MessageLevel.Warning,
+            )
+            self._shutdown_inspector(update_ui=False)
+            return
 
         # Clear previous results
         self.inspector_tree.clear()
@@ -7482,14 +8331,15 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
         self._inspector_thread = InspectorWorker(ee_layers, (lon, lat), int(ee_scale))
         self._inspector_thread.finished.connect(self._on_inspection_finished)
         self._inspector_thread.error.connect(self._on_inspection_error)
-        self._inspector_thread.progress.connect(
-            lambda msg: self.inspector_status_label.setText(msg)
-        )
+        self._inspector_thread.progress.connect(self._set_inspector_status)
         self._inspector_thread.start()
 
     def _on_inspection_finished(self, results):
         """Handle inspection results."""
         import json
+
+        if self._inspector_shutting_down or not self._inspector_ui_available():
+            return
 
         # Hide progress bar
         self.inspector_progress_bar.setVisible(False)
@@ -7570,6 +8420,9 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
 
     def _on_inspection_error(self, error):
         """Handle inspection error."""
+        if self._inspector_shutting_down or not self._inspector_ui_available():
+            return
+
         # Hide progress bar
         self.inspector_progress_bar.setVisible(False)
 
@@ -8945,8 +9798,7 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
     def closeEvent(self, event):
         """Handle dock widget close event."""
         # Deactivate inspector if active
-        if self._inspector_map_tool:
-            self._inspector_map_tool.deactivate()
+        self._shutdown_inspector(update_ui=False)
 
         # Stop time series playback and timer
         self._stop_timeseries_playback()
@@ -8967,6 +9819,9 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
         if self._thumbnail_thread and self._thumbnail_thread.isRunning():
             self._thumbnail_thread.terminate()
             self._thumbnail_thread.wait()
+        if self._saved_thumbnail_thread and self._saved_thumbnail_thread.isRunning():
+            self._saved_thumbnail_thread.terminate()
+            self._saved_thumbnail_thread.wait()
         if self._inspector_thread and self._inspector_thread.isRunning():
             self._inspector_thread.terminate()
             self._inspector_thread.wait()
@@ -8975,3 +9830,8 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
             self._timeseries_thread.wait()
 
         event.accept()
+
+    def hideEvent(self, event):
+        """Deactivate map tools when the dock is hidden."""
+        self._shutdown_inspector(update_ui=True)
+        super().hideEvent(event)

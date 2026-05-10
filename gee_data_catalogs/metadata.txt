@@ -3,7 +3,7 @@ name=Earth Engine Data Catalogs
 qgisMinimumVersion=3.28
 qgisMaximumVersion=4.99
 description=Browse, search, and load Google Earth Engine data catalogs directly in QGIS.
-version=0.12.2
+version=0.13.0
 author=Qiusheng Wu
 email=giswqs@gmail.com
 
@@ -25,7 +25,7 @@ about=A comprehensive plugin for exploring and loading Google Earth Engine datas
 tracker=https://github.com/opengeos/qgis-gee-data-catalogs-plugin/issues
 repository=https://github.com/opengeos/qgis-gee-data-catalogs-plugin
 
-hasProcessingProvider=no
+hasProcessingProvider=yes
 
 tags=earth engine, google, gee, remote sensing, satellite, imagery, geospatial, catalog, data
 
@@ -37,6 +37,8 @@ experimental=False
 deprecated=False
 
 changelog=
+    0.13.0
+        - Add favorites, recent datasets, workflow recipes, project snapshots, export queue/history, ranked search, persistent catalog cache, AI context handoff, and QGIS Processing algorithms
     0.12.2
         - Fix macOS QGIS installer dependency installation
     0.12.1
