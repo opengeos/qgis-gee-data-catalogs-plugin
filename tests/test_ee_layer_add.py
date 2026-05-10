@@ -117,3 +117,164 @@ def test_add_ee_layer_falls_back_when_qgis_geemap_returns_invalid(monkeypatch):
     assert added_layers == [(layer, False)]
     assert inserted_layers == [(0, layer)]
     assert removed_layers == []
+
+
+def test_add_ee_layer_expands_named_palette_before_get_map_id(monkeypatch):
+    captured_vis = []
+
+    class _FakeLayer:
+        def __init__(self, uri="", name="", provider=""):
+            self.uri = uri
+            self._name = name
+            self.custom_properties = {}
+
+        def isValid(self):
+            return True
+
+        def id(self):
+            return self._name
+
+        def name(self):
+            return self._name
+
+        def renderer(self):
+            return None
+
+        def setCustomProperty(self, key, value):
+            self.custom_properties[key] = value
+
+    class _LayerTreeRoot:
+        def insertLayer(self, index, layer):
+            pass
+
+        def findLayer(self, layer_id):
+            return None
+
+    class _Project:
+        def mapLayersByName(self, name):
+            return []
+
+        def removeMapLayer(self, layer_id):
+            pass
+
+        def addMapLayer(self, layer, add_to_legend):
+            pass
+
+        def layerTreeRoot(self):
+            return _LayerTreeRoot()
+
+    class _QgsProject:
+        @staticmethod
+        def instance():
+            return _Project()
+
+    class _FakeImage:
+        def getMapId(self, vis_params):
+            captured_vis.append(vis_params)
+            return {
+                "tile_fetcher": types.SimpleNamespace(
+                    url_format="https://example.com/{z}/{x}/{y}"
+                )
+            }
+
+        def get(self, key):
+            raise RuntimeError("no asset id")
+
+    ee_module = types.SimpleNamespace(
+        Image=_FakeImage,
+        ImageCollection=type("ImageCollection", (), {}),
+        FeatureCollection=type("FeatureCollection", (), {}),
+        serializer=types.SimpleNamespace(toJSON=lambda obj: "{}"),
+    )
+
+    monkeypatch.setattr(ee_utils, "ee", ee_module)
+    monkeypatch.setattr(ee_utils, "QgsRasterLayer", _FakeLayer)
+    monkeypatch.setattr(ee_utils, "QgsProject", _QgsProject)
+    monkeypatch.setattr(
+        ee_utils,
+        "_colormap_colors",
+        lambda name, n_colors=256: ["#000000", "#ffffff"] if name == "terrain" else [],
+    )
+    monkeypatch.setitem(sys.modules, "qgis_geemap", types.ModuleType("qgis_geemap"))
+
+    ee_utils.add_ee_layer(_FakeImage(), {"palette": "terrain"}, "DEM")
+
+    assert captured_vis == [{"palette": ["#000000", "#ffffff"]}]
+
+
+def test_add_ee_layer_renames_valid_qgis_geemap_layer(monkeypatch):
+    class _FakeLayer:
+        def __init__(self, uri="", name="Layer", provider=""):
+            self.uri = uri
+            self._name = name
+            self.custom_properties = {}
+
+        def isValid(self):
+            return True
+
+        def id(self):
+            return self._name
+
+        def name(self):
+            return self._name
+
+        def setName(self, name):
+            self._name = name
+
+        def renderer(self):
+            return None
+
+        def setCustomProperty(self, key, value):
+            self.custom_properties[key] = value
+
+    class _Project:
+        def mapLayersByName(self, name):
+            return []
+
+        def removeMapLayer(self, layer_id):
+            pass
+
+    class _QgsProject:
+        @staticmethod
+        def instance():
+            return _Project()
+
+    class _FakeImage:
+        def get(self, key):
+            raise RuntimeError("no asset id")
+
+    returned_layer = _FakeLayer(name="Layer")
+
+    class _FakeMap:
+        def add_layer(self, ee_object, vis_params, name, shown, opacity):
+            return returned_layer
+
+    ee_module = types.SimpleNamespace(
+        Image=_FakeImage,
+        ImageCollection=type("ImageCollection", (), {}),
+        FeatureCollection=type("FeatureCollection", (), {}),
+        serializer=types.SimpleNamespace(toJSON=lambda obj: "{}"),
+    )
+    qgis_geemap_module = types.ModuleType("qgis_geemap.core.qgis_map")
+    qgis_geemap_module.Map = _FakeMap
+
+    monkeypatch.setattr(ee_utils, "ee", ee_module)
+    monkeypatch.setattr(ee_utils, "QgsRasterLayer", _FakeLayer)
+    monkeypatch.setattr(ee_utils, "QgsProject", _QgsProject)
+    monkeypatch.setitem(sys.modules, "qgis_geemap", types.ModuleType("qgis_geemap"))
+    monkeypatch.setitem(
+        sys.modules, "qgis_geemap.core", types.ModuleType("qgis_geemap.core")
+    )
+    monkeypatch.setitem(sys.modules, "qgis_geemap.core.qgis_map", qgis_geemap_module)
+
+    layer = ee_utils.add_ee_layer(_FakeImage(), {}, "Elevation")
+
+    assert layer is returned_layer
+    assert layer.name() == "Elevation"
+    assert "Elevation" in ee_utils.get_ee_layers()
+
+
+def test_normalize_vis_params_splits_comma_palette():
+    assert ee_utils.normalize_vis_params({"palette": "red, yellow, #0000ff"}) == {
+        "palette": ["red", "yellow", "#0000ff"]
+    }

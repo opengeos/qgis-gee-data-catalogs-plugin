@@ -34,6 +34,7 @@ class GeeDataCatalogs:
         self._catalog_dock = None
         self._settings_dock = None
         self._deps_dock = None
+        self._processing_provider = None
 
         # Dependency status (checked lazily on first button click)
         self._deps_ready = False
@@ -192,6 +193,8 @@ class GeeDataCatalogs:
         # Connect to project read signal to refresh EE layers when project opens
         QgsProject.instance().readProject.connect(self._on_project_read)
 
+        self._register_processing_provider()
+
     def unload(self):
         """Remove the plugin menu item and icon from QGIS GUI."""
         # Disconnect project signals
@@ -220,6 +223,8 @@ class GeeDataCatalogs:
             self._deps_dock.deleteLater()
             self._deps_dock = None
 
+        self._unregister_processing_provider()
+
         # Remove actions from menu
         for action in self.actions:
             self.iface.removePluginMenu("&GEE Data Catalogs", action)
@@ -231,6 +236,37 @@ class GeeDataCatalogs:
         # Remove menu
         if self.menu:
             self.menu.deleteLater()
+
+    def _register_processing_provider(self):
+        """Register QGIS Processing algorithms when Processing is available."""
+        try:
+            from qgis.core import QgsApplication
+            from .processing_provider import GeeDataCatalogsProvider
+
+            self._processing_provider = GeeDataCatalogsProvider()
+            QgsApplication.processingRegistry().addProvider(self._processing_provider)
+        except Exception:
+            self._processing_provider = None
+
+    def _unregister_processing_provider(self):
+        """Unregister QGIS Processing algorithms."""
+        if self._processing_provider is None:
+            return
+        try:
+            from qgis.core import QgsApplication
+
+            QgsApplication.processingRegistry().removeProvider(
+                self._processing_provider
+            )
+        except Exception as exc:
+            from qgis.core import QgsMessageLog, Qgis
+
+            QgsMessageLog.logMessage(
+                f"Failed to unregister Processing provider: {exc}",
+                "GEE Data Catalogs",
+                Qgis.MessageLevel.Warning,
+            )
+        self._processing_provider = None
 
     def _ensure_dependencies(self, callback):
         """Check dependencies and run callback if ready, otherwise show deps dock.
@@ -643,7 +679,7 @@ class GeeDataCatalogs:
         """Handle Catalog dock visibility change."""
         self._sync_panel_actions()
 
-    def open_ai_assistant(self):
+    def open_ai_assistant(self, with_context=False):
         """Open the OpenGeoAgent chat panel, or prompt for plugin installation."""
         plugin = self._get_open_geoagent_plugin()
         if plugin is None:
@@ -665,14 +701,44 @@ class GeeDataCatalogs:
             if chat_dock is not None and chat_dock.isVisible():
                 chat_dock.show()
                 chat_dock.raise_()
+                if with_context:
+                    self._prime_open_geoagent_prompt(plugin)
                 return
 
             plugin.toggle_chat_dock()
+            if with_context:
+                self._prime_open_geoagent_prompt(plugin)
         except Exception as exc:
             QMessageBox.critical(
                 self.iface.mainWindow(),
                 "OpenGeoAgent",
                 f"Failed to open the OpenGeoAgent chat panel:\n{exc}",
+            )
+
+    def _prime_open_geoagent_prompt(self, plugin):
+        """Best-effort handoff of current GEE plugin context to OpenGeoAgent."""
+        try:
+            if self._catalog_dock is None or not hasattr(
+                self._catalog_dock, "get_ai_context_snapshot"
+            ):
+                return
+            context = self._catalog_dock.get_ai_context_snapshot()
+            chat_dock = getattr(plugin, "_chat_dock", None)
+            prompt_widget = getattr(chat_dock, "prompt_input", None)
+            if prompt_widget is not None and hasattr(prompt_widget, "setPlainText"):
+                prompt_widget.setPlainText(
+                    "Use this QGIS and Earth Engine context for my next request:\n\n"
+                    f"{context}\n\nNext request: "
+                )
+                if hasattr(prompt_widget, "setFocus"):
+                    prompt_widget.setFocus()
+        except Exception as exc:
+            from qgis.core import QgsMessageLog, Qgis
+
+            QgsMessageLog.logMessage(
+                f"Could not pass context to OpenGeoAgent: {exc}",
+                "GEE Data Catalogs",
+                Qgis.MessageLevel.Warning,
             )
 
     def _get_open_geoagent_plugin(self):

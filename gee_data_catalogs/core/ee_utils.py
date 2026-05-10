@@ -59,6 +59,64 @@ _tile_url_cache: Dict[tuple, str] = {}
 _TILE_CACHE_CAP = 64
 
 
+def _colormap_colors(name: str, n_colors: int = 256) -> List[str]:
+    """Return sampled hex colors for a Matplotlib colormap name.
+
+    Earth Engine palettes accept CSS colors, not colormap names like
+    ``terrain``. The Load tab has long accepted those names by expanding them
+    before calling ``add_ee_layer``; this helper makes the same normalization
+    available to Code tab snippets and any direct API caller.
+    """
+    if not name or "," in name or name.startswith("#") or name.startswith("rgb"):
+        return []
+
+    try:
+        import matplotlib.colors as mcolors
+        import matplotlib.pyplot as plt
+
+        cmap = plt.get_cmap(name)
+        return [mcolors.to_hex(cmap(i / (n_colors - 1))) for i in range(n_colors)]
+    except Exception:
+        return []
+
+
+def normalize_vis_params(vis_params: Optional[Dict]) -> Dict:
+    """Normalize visualization parameters before sending them to Earth Engine."""
+    normalized = dict(vis_params or {})
+    palette = normalized.get("palette")
+    if not palette:
+        return normalized
+
+    if isinstance(palette, str):
+        if "," in palette:
+            normalized["palette"] = [
+                color.strip().strip("\"'")
+                for color in palette.split(",")
+                if color.strip().strip("\"'")
+            ]
+            return normalized
+
+        colors = _colormap_colors(palette.strip())
+        if colors:
+            normalized["palette"] = colors
+        return normalized
+
+    if isinstance(palette, (list, tuple)):
+        palette_list = [
+            str(color).strip().strip("\"'")
+            for color in palette
+            if str(color).strip().strip("\"'")
+        ]
+        if len(palette_list) == 1:
+            colors = _colormap_colors(palette_list[0])
+            if colors:
+                normalized["palette"] = colors
+                return normalized
+        normalized["palette"] = palette_list
+
+    return normalized
+
+
 def _hashable_vis_params(vis_params: Dict) -> tuple:
     """Return a hashable representation of vis_params for use as a cache key.
 
@@ -317,7 +375,7 @@ def get_ee_tile_url(
             "The 'ee' module is not installed. Please install earthengine-api."
         )
 
-    vis_params = vis_params or {}
+    vis_params = normalize_vis_params(vis_params)
 
     # Handle ImageCollection by taking the first image or mosaic
     if isinstance(ee_object, ee.ImageCollection):
@@ -378,6 +436,21 @@ def _is_valid_qgis_layer(layer: Any) -> bool:
         return False
 
 
+def _apply_layer_name(layer: Any, name: str) -> None:
+    """Ensure a QGIS layer returned by another helper uses our requested name."""
+    if not name or not hasattr(layer, "setName"):
+        return
+    try:
+        if not hasattr(layer, "name") or layer.name() != name:
+            layer.setName(name)
+    except Exception as exc:
+        QgsMessageLog.logMessage(
+            f"Could not rename Earth Engine layer to '{name}': {exc}",
+            "GEE Data Catalogs",
+            Qgis.MessageLevel.Warning,
+        )
+
+
 def _create_xyz_ee_layer(
     ee_object: Any,
     vis_params: Dict,
@@ -435,7 +508,7 @@ def add_ee_layer(
             "The 'ee' module is not installed. Please install earthengine-api."
         )
 
-    vis_params = vis_params or {}
+    vis_params = normalize_vis_params(vis_params)
 
     # Remove existing layer with the same name if it exists
     project = QgsProject.instance()
@@ -481,6 +554,8 @@ def add_ee_layer(
         layer = None
 
     if layer is not None:
+        _apply_layer_name(layer, name)
+
         # Restore the map extent after qgis_geemap adds the layer
         if current_extent and iface and iface.mapCanvas():
             iface.mapCanvas().setExtent(current_extent)

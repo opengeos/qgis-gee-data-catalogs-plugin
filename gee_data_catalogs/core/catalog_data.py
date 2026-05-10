@@ -11,6 +11,7 @@ import csv
 import io
 import json
 import os
+import time
 from typing import Any, Dict, List, Optional
 from urllib.request import urlopen
 from urllib.error import URLError, HTTPError
@@ -31,6 +32,109 @@ _catalog_cache = {
     "community": None,
     "last_update": None,
 }
+
+_DISK_CACHE_VERSION = 1
+
+
+def _cache_dir() -> str:
+    """Return the plugin cache directory."""
+    base = (
+        os.environ.get("XDG_CACHE_HOME")
+        or os.environ.get("LOCALAPPDATA")
+        or os.path.join(os.path.expanduser("~"), ".cache")
+    )
+    return os.path.join(base, "qgis-gee-data-catalogs")
+
+
+def _cache_path(source: str) -> str:
+    return os.path.join(_cache_dir(), f"{source}_catalog.json")
+
+
+def _cache_settings() -> tuple[bool, int]:
+    """Return whether disk cache is enabled and its max age in hours."""
+    try:
+        settings = QgsSettings()
+        enabled = settings.value("GeeDataCatalogs/cache_enabled", True, type=bool)
+        duration = settings.value("GeeDataCatalogs/cache_duration", 24, type=int)
+        return bool(enabled), max(1, int(duration))
+    except Exception:
+        return True, 24
+
+
+def _read_disk_cache(source: str) -> Optional[List[Dict]]:
+    enabled, duration_hours = _cache_settings()
+    if not enabled:
+        return None
+
+    path = _cache_path(source)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if payload.get("version") != _DISK_CACHE_VERSION:
+            return None
+        created_at = float(payload.get("created_at", 0))
+        if time.time() - created_at > duration_hours * 3600:
+            return None
+        datasets = payload.get("datasets")
+        if isinstance(datasets, list):
+            QgsMessageLog.logMessage(
+                f"Loaded {len(datasets)} {source} datasets from disk cache",
+                "GEE Data Catalogs",
+                Qgis.MessageLevel.Info,
+            )
+            return datasets
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        QgsMessageLog.logMessage(
+            f"Failed to read {source} catalog cache: {exc}",
+            "GEE Data Catalogs",
+            Qgis.MessageLevel.Warning,
+        )
+    return None
+
+
+def _write_disk_cache(source: str, datasets: List[Dict]) -> None:
+    enabled, _duration_hours = _cache_settings()
+    if not enabled:
+        return
+    try:
+        os.makedirs(_cache_dir(), exist_ok=True)
+        with open(_cache_path(source), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "version": _DISK_CACHE_VERSION,
+                    "created_at": time.time(),
+                    "datasets": datasets,
+                },
+                f,
+            )
+    except Exception as exc:
+        QgsMessageLog.logMessage(
+            f"Failed to write {source} catalog cache: {exc}",
+            "GEE Data Catalogs",
+            Qgis.MessageLevel.Warning,
+        )
+
+
+def _read_any_disk_cache(source: str) -> Optional[List[Dict]]:
+    """Return stale cache as a network-failure fallback."""
+    path = _cache_path(source)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        datasets = payload.get("datasets")
+        if isinstance(datasets, list):
+            QgsMessageLog.logMessage(
+                f"Using stale {source} catalog cache with {len(datasets)} datasets",
+                "GEE Data Catalogs",
+                Qgis.MessageLevel.Warning,
+            )
+            return datasets
+    except Exception:
+        return None
+    return None
+
 
 # Default categories for organizing datasets (aligned with official GEE categories)
 # https://developers.google.com/earth-engine/datasets/categories
@@ -654,6 +758,12 @@ def fetch_official_catalog(use_cache: bool = True) -> List[Dict]:
     if use_cache and _catalog_cache["official"] is not None:
         return _catalog_cache["official"]
 
+    if use_cache:
+        cached = _read_disk_cache("official")
+        if cached is not None:
+            _catalog_cache["official"] = cached
+            return cached
+
     datasets = []
 
     # Try JSON first, then TSV
@@ -678,6 +788,7 @@ def fetch_official_catalog(use_cache: bool = True) -> List[Dict]:
                         Qgis.MessageLevel.Info,
                     )
                     _catalog_cache["official"] = datasets
+                    _write_disk_cache("official", datasets)
                     return datasets
         except (HTTPError, URLError) as e:
             QgsMessageLog.logMessage(
@@ -691,6 +802,11 @@ def fetch_official_catalog(use_cache: bool = True) -> List[Dict]:
                 "GEE Data Catalogs",
                 Qgis.MessageLevel.Warning,
             )
+
+    cached = _read_any_disk_cache("official")
+    if cached is not None:
+        _catalog_cache["official"] = cached
+        return cached
 
     return datasets
 
@@ -708,6 +824,12 @@ def fetch_community_catalog(use_cache: bool = True) -> List[Dict]:
 
     if use_cache and _catalog_cache["community"] is not None:
         return _catalog_cache["community"]
+
+    if use_cache:
+        cached = _read_disk_cache("community")
+        if cached is not None:
+            _catalog_cache["community"] = cached
+            return cached
 
     datasets = []
 
@@ -733,6 +855,7 @@ def fetch_community_catalog(use_cache: bool = True) -> List[Dict]:
                         Qgis.MessageLevel.Info,
                     )
                     _catalog_cache["community"] = datasets
+                    _write_disk_cache("community", datasets)
                     return datasets
         except (HTTPError, URLError) as e:
             QgsMessageLog.logMessage(
@@ -746,6 +869,11 @@ def fetch_community_catalog(use_cache: bool = True) -> List[Dict]:
                 "GEE Data Catalogs",
                 Qgis.MessageLevel.Warning,
             )
+
+    cached = _read_any_disk_cache("community")
+    if cached is not None:
+        _catalog_cache["community"] = cached
+        return cached
 
     return datasets
 
@@ -865,6 +993,7 @@ def search_datasets(
     datasets = get_all_datasets(include_community=include_community)
     results = []
     query_lower = query.lower().strip()
+    query_terms = [term for term in query_lower.split() if term]
 
     for dataset in datasets:
         # Check category filter
@@ -886,31 +1015,61 @@ def search_datasets(
         if source and dataset.get("source") != source:
             continue
 
+        score = 0
+
         # Check query match
         if query_lower:
             matches = False
-            search_fields = [
-                str(dataset.get("name", "")).lower(),
-                str(dataset.get("title", "")).lower(),
-                str(dataset.get("description", "")).lower(),
-                str(dataset.get("id", "")).lower(),
+            weighted_fields = [
+                (str(dataset.get("name", "")).lower(), 80),
+                (str(dataset.get("title", "")).lower(), 80),
+                (str(dataset.get("id", "")).lower(), 60),
+                (str(dataset.get("provider", "")).lower(), 35),
+                (str(dataset.get("category", "")).lower(), 30),
+                (str(dataset.get("description", "")).lower(), 12),
             ]
             # Add keywords
             keywords = dataset.get("keywords", [])
             if isinstance(keywords, list):
-                search_fields.extend([k.lower() for k in keywords])
+                weighted_fields.extend((k.lower(), 40) for k in keywords)
             else:
-                search_fields.append(str(keywords).lower())
+                weighted_fields.append((str(keywords).lower(), 40))
 
-            for field in search_fields:
+            for field, weight in weighted_fields:
                 if query_lower in field:
                     matches = True
-                    break
+                    score += weight * 2
+                for term in query_terms:
+                    if term in field:
+                        matches = True
+                        score += weight
+
+            # Prefer exact ID/name matches and official catalog entries when
+            # relevance is otherwise similar.
+            if query_lower == str(dataset.get("id", "")).lower():
+                score += 500
+            if query_lower == str(dataset.get("name", "")).lower():
+                score += 400
+            if dataset.get("source") == "official":
+                score += 5
 
             if not matches:
                 continue
 
-        results.append(dataset)
+        result = dict(dataset)
+        if query_lower:
+            result["_search_score"] = score
+        results.append(result)
+
+    if query_lower:
+        results.sort(
+            key=lambda item: (
+                item.get("_search_score", 0),
+                item.get("source") == "official",
+                str(item.get("name", "")),
+            ),
+            reverse=True,
+        )
 
     return results
 
