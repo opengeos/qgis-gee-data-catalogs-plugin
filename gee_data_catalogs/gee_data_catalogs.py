@@ -18,6 +18,7 @@ OPEN_GEOAGENT_PLUGIN_CANDIDATES = ("open_geoagent",)
 TOOLBAR_OBJECT_NAME = "GeeDataCatalogsToolbar"
 MENU_TITLE = "&GEE Data Catalogs"
 
+
 class GeeDataCatalogs:
     """GEE Data Catalogs plugin implementation class for QGIS."""
 
@@ -199,7 +200,6 @@ class GeeDataCatalogs:
         QgsProject.instance().readProject.connect(self._on_project_read)
 
         self._register_processing_provider()
-
 
     def _remove_toolbar(self, toolbar):
         """Detach and schedule deletion of a plugin toolbar widget."""
