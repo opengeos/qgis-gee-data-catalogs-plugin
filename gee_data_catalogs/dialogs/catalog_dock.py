@@ -1436,6 +1436,16 @@ class VectorTimeSeriesExtractionWorker(QThread):
         self.time_series_images = time_series_images or []
         self.time_series_labels = time_series_labels or []
         self._skipped_empty_steps = 0
+        self._cancelled = False
+
+    def cancel(self):
+        """Request a cooperative cancellation of the running extraction."""
+        self._cancelled = True
+        self.requestInterruption()
+
+    def _is_cancelled(self) -> bool:
+        """Return whether the worker was asked to stop."""
+        return self._cancelled or self.isInterruptionRequested()
 
     def _apply_property_filters(self, collection):
         """Apply configured property filters to an ImageCollection.
@@ -1748,37 +1758,54 @@ class VectorTimeSeriesExtractionWorker(QThread):
 
         unit, step = self._frequency_settings()
         reducer = self._temporal_ee_reducer()
-        time_steps = []
+        date_strings = self._time_series_steps()
+        if not date_strings:
+            return []
 
-        for date_str in self._time_series_steps():
+        advance_unit = unit if unit in ("day", "month", "year") else "month"
+        clip_region = region_geom
+
+        def make_composite(date_str_ee):
+            """Build a server-side composite for a single time step."""
+            date_str = ee.String(date_str_ee)
             start = ee.Date(date_str)
-            if unit == "day":
-                end = start.advance(step, "day")
-            elif unit == "month":
-                end = start.advance(step, "month")
-            elif unit == "year":
-                end = start.advance(step, "year")
-            else:
-                end = start.advance(step, "month")
+            end = start.advance(step, advance_unit)
+            sub = collection.filterDate(start, end)
+            img = sub.reduce(reducer)
+            if clip_region is not None:
+                img = img.clip(clip_region)
+            return img.set(
+                {
+                    "_gee_step_date": date_str,
+                    "_gee_step_timestamp": start.millis(),
+                    "_gee_step_band_count": img.bandNames().size(),
+                }
+            )
 
-            sub_col = collection.filterDate(start, end)
-            if sub_col.size().getInfo() == 0:
-                continue
+        composites = ee.ImageCollection.fromImages(
+            ee.List(date_strings).map(make_composite)
+        )
+        composites = composites.filter(ee.Filter.gt("_gee_step_band_count", 0))
 
-            image = sub_col.reduce(reducer)
-            if region_geom:
-                image = image.clip(region_geom)
-            if not image.bandNames().getInfo():
-                self._skipped_empty_steps += 1
-                continue
+        step_dates = composites.aggregate_array("_gee_step_date").getInfo() or []
+        step_timestamps = (
+            composites.aggregate_array("_gee_step_timestamp").getInfo() or []
+        )
+        non_empty = len(step_dates)
+        self._skipped_empty_steps += len(date_strings) - non_empty
+        if non_empty == 0:
+            return []
 
-            label = self._time_label(date_str)
+        composites_list = composites.toList(non_empty)
+        time_steps = []
+        for i in range(non_empty):
+            date_str = step_dates[i]
             time_steps.append(
                 {
-                    "image": image,
+                    "image": ee.Image(composites_list.get(i)),
                     "date": date_str,
-                    "label": label,
-                    "timestamp": start.millis(),
+                    "label": self._time_label(date_str),
+                    "timestamp": step_timestamps[i],
                 }
             )
 
@@ -1804,12 +1831,23 @@ class VectorTimeSeriesExtractionWorker(QThread):
 
             self.progress.emit("Preparing vector features...")
             ee_features = []
-            for vector_feature in self.vector_features:
-                properties = vector_feature.get("properties", {})
+            source_records = []
+            for index, vector_feature in enumerate(self.vector_features):
+                if self._is_cancelled():
+                    self.error.emit("Vector time series extraction was cancelled.")
+                    return
+                properties = dict(vector_feature.get("properties", {}))
+                record = dict(properties)
+                record["_gee_idx"] = index
+                source_records.append(record)
                 ee_features.append(
-                    ee.Feature(ee.Geometry(vector_feature["geometry"]), properties)
+                    ee.Feature(
+                        ee.Geometry(vector_feature["geometry"]),
+                        {"_gee_idx": index},
+                    )
                 )
 
+            source_df = pd.DataFrame(source_records)
             vectors_fc = ee.FeatureCollection(ee_features)
 
             if self.time_series_images:
@@ -1833,9 +1871,18 @@ class VectorTimeSeriesExtractionWorker(QThread):
                 f"Reducing {feature_count} vector feature(s) across {size} time step(s)..."
             )
             reducer = self._ee_reducer()
+            metadata_fields = {
+                "gee_ts_date",
+                "gee_ts_time_label",
+                "gee_ts_timestamp",
+                "gee_ts_image_id",
+            }
             gdfs = []
 
             for index, time_step in enumerate(time_steps):
+                if self._is_cancelled():
+                    self.error.emit("Vector time series extraction was cancelled.")
+                    return
                 image = ee.Image(time_step["image"])
                 image_date = time_step["date"]
                 image_label = time_step["label"]
@@ -1845,14 +1892,17 @@ class VectorTimeSeriesExtractionWorker(QThread):
                     """Add image metadata to a sampled vector feature."""
                     return feature.set(
                         {
-                            "date": image_date,
-                            "time_label": image_label,
-                            "timestamp": image_timestamp,
-                            "image_id": image_label,
+                            "gee_ts_date": image_date,
+                            "gee_ts_time_label": image_label,
+                            "gee_ts_timestamp": image_timestamp,
+                            "gee_ts_image_id": image_label,
                         }
                     )
 
                 for start in range(0, feature_count, self.batch_size):
+                    if self._is_cancelled():
+                        self.error.emit("Vector time series extraction was cancelled.")
+                        return
                     end = min(start + self.batch_size, feature_count)
                     chunk_fc = ee.FeatureCollection(ee_features[start:end])
                     sampled = image.reduceRegions(
@@ -1884,14 +1934,38 @@ class VectorTimeSeriesExtractionWorker(QThread):
                     if not image_gdf.empty:
                         gdfs.append(image_gdf)
 
+            if self._is_cancelled():
+                self.error.emit("Vector time series extraction was cancelled.")
+                return
+
             if not gdfs:
                 self.error.emit("No sampled vector values were returned.")
                 return
 
-            gdf = gpd.GeoDataFrame(
+            combined = gpd.GeoDataFrame(
                 pd.concat(gdfs, ignore_index=True),
                 crs=gdfs[0].crs,
             )
+
+            sampled_columns = set(combined.columns)
+            band_value_columns = (
+                sampled_columns
+                - metadata_fields
+                - {
+                    "geometry",
+                    "_gee_idx",
+                }
+            )
+            source_columns = set(source_df.columns) - {"_gee_idx"}
+            collisions = band_value_columns & source_columns
+            if collisions:
+                rename_map = {col: f"gee_value_{col}" for col in collisions}
+                combined = combined.rename(columns=rename_map)
+
+            gdf = combined.merge(
+                source_df, on="_gee_idx", how="left", suffixes=("", "_source")
+            )
+            gdf = gdf.drop(columns=["_gee_idx"], errors="ignore")
             output_path = self._resolved_output_path()
             driver, _ = self._format_info()
 
@@ -3090,6 +3164,7 @@ class CatalogDockWidget(QDockWidget):
         self._timeseries_images = []
         self._timeseries_labels = []
         self._timeseries_collection = None
+        self._timeseries_fingerprint = None
         self._timeseries_vis_params = {}
         self._timeseries_timer = None
         self._timeseries_playing = False
@@ -9449,6 +9524,63 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
 
     # ==================== Time Series Vector Extraction Methods ====================
 
+    def _compute_ts_fingerprint(self):
+        """Capture the Time Series UI state that affects composite content.
+
+        Returns:
+            Hashable tuple summarising the settings used to build the cached
+            time series composites. Used to detect when the cached
+            ``_timeseries_collection`` has gone stale relative to the current
+            UI state.
+        """
+        asset_id = self.ts_dataset_id_input.text().strip()
+        start_date = self.ts_start_date.date().toString("yyyy-MM-dd")
+        end_date = self.ts_end_date.date().toString("yyyy-MM-dd")
+        frequency = self.ts_frequency_combo.currentText()
+        reducer = self.ts_reducer_combo.currentText()
+
+        bands_text = self.ts_bands_input.text().strip()
+        bands = tuple(
+            band.strip().strip("\"'") for band in bands_text.split(",") if band.strip()
+        )
+
+        region = self._get_spatial_filter_ts()
+        region_key = tuple(region) if region else None
+
+        cloud_cover = None
+        if self.ts_use_cloud_filter.isChecked():
+            cloud_cover = self.ts_cloud_cover_spin.value()
+        custom_cloud_property = self.ts_cloud_property_input.text().strip()
+        cloud_property = self._get_cloud_property(asset_id, custom_cloud_property)
+
+        property_filters = tuple(
+            tuple(item)
+            for item in self._parse_property_filters(
+                self.ts_property_filters.toPlainText()
+            )
+        )
+
+        month_start = None
+        month_end = None
+        if self.ts_use_month_filter.isChecked():
+            month_start = self.ts_month_start_spin.value()
+            month_end = self.ts_month_end_spin.value()
+
+        return (
+            asset_id,
+            start_date,
+            end_date,
+            frequency,
+            reducer,
+            bands,
+            region_key,
+            cloud_cover,
+            cloud_property,
+            property_filters,
+            month_start,
+            month_end,
+        )
+
     def _refresh_ts_point_layers(self):
         """Refresh the Time Series tab vector layer dropdown."""
         if not hasattr(self, "ts_points_layer_combo"):
@@ -9566,14 +9698,33 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
                 )
                 return None
 
+        if not layer.crs().isValid():
+            QMessageBox.warning(
+                self,
+                "Missing CRS",
+                "The selected vector source has no valid coordinate reference "
+                "system. Assign a CRS to the layer or file before extracting "
+                "time series values, otherwise coordinates would be sent to "
+                "Earth Engine as if they were already WGS84.",
+            )
+            return None
+
         wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
         transform = None
-        if layer.crs().isValid() and layer.crs().authid() != "EPSG:4326":
+        if layer.crs().authid() != "EPSG:4326":
             transform = QgsCoordinateTransform(
                 layer.crs(), wgs84, QgsProject.instance()
             )
 
         field_names = [field.name() for field in layer.fields()]
+        reserved_names = {
+            "gee_feature_id",
+            "gee_source_fid",
+            "gee_ts_date",
+            "gee_ts_time_label",
+            "gee_ts_timestamp",
+            "gee_ts_image_id",
+        }
         feature_id_name = "gee_feature_id"
         source_fid_name = "gee_source_fid"
         while feature_id_name in field_names:
@@ -9583,7 +9734,9 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
 
         vector_features = []
         feature_id = 1
-        for feature in layer.getFeatures():
+        for index, feature in enumerate(layer.getFeatures()):
+            if index and index % 200 == 0:
+                QApplication.processEvents()
             geometry = feature.geometry()
             if geometry is None or geometry.isEmpty():
                 continue
@@ -9592,10 +9745,18 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
             if transform is not None:
                 geometry.transform(transform)
 
-            properties = {
-                name: self._safe_ee_property_value(value)
-                for name, value in zip(field_names, feature.attributes())
-            }
+            properties = {}
+            for name, value in zip(field_names, feature.attributes()):
+                if name in reserved_names and name not in (
+                    feature_id_name,
+                    source_fid_name,
+                ):
+                    safe_name = name
+                    while safe_name in field_names or safe_name in reserved_names:
+                        safe_name += "_"
+                    properties[safe_name] = self._safe_ee_property_value(value)
+                else:
+                    properties[name] = self._safe_ee_property_value(value)
             properties[source_fid_name] = int(feature.id())
 
             properties[feature_id_name] = feature_id
@@ -9693,8 +9854,18 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
             month_end = self.ts_month_end_spin.value()
 
         region = self._get_spatial_filter_ts()
-        time_series_images = self._timeseries_collection or []
-        time_series_labels = self._timeseries_labels or []
+        cached_collection = self._timeseries_collection or []
+        cached_labels = self._timeseries_labels or []
+        if (
+            cached_collection
+            and self._timeseries_fingerprint is not None
+            and self._timeseries_fingerprint == self._compute_ts_fingerprint()
+        ):
+            time_series_images = cached_collection
+            time_series_labels = cached_labels
+        else:
+            time_series_images = []
+            time_series_labels = []
 
         self.ts_points_progress.setVisible(True)
         time_series_source = (
@@ -9962,6 +10133,7 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
                 month_end=month_end,
                 date_strings=date_strings,
             )
+            self._timeseries_fingerprint = self._compute_ts_fingerprint()
 
             # Build visualization parameters
             self._timeseries_vis_params = self._build_ts_vis_params()
@@ -10858,8 +11030,13 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
             self._ts_points_extract_thread
             and self._ts_points_extract_thread.isRunning()
         ):
-            self._ts_points_extract_thread.terminate()
-            self._ts_points_extract_thread.wait()
+            # Cooperative cancellation so an in-flight Earth Engine request or
+            # vector file write isn't aborted mid-write (which would leave a
+            # partially written/corrupt output file).
+            self._ts_points_extract_thread.cancel()
+            if not self._ts_points_extract_thread.wait(5000):
+                self._ts_points_extract_thread.terminate()
+                self._ts_points_extract_thread.wait()
 
         event.accept()
 
