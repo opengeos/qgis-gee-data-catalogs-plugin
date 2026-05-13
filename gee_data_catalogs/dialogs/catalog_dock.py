@@ -1360,6 +1360,562 @@ class PixelTimeSeriesWorker(QThread):
             self.error.emit(f"{str(e)}\n{traceback.format_exc()}")
 
 
+class VectorTimeSeriesExtractionWorker(QThread):
+    """Thread for extracting image values over vector geometries."""
+
+    finished = pyqtSignal(str, int)
+    error = pyqtSignal(str)
+    progress = pyqtSignal(str)
+
+    def __init__(
+        self,
+        asset_id: str,
+        vector_features: list,
+        start_date: str,
+        end_date: str,
+        output_path: str,
+        vector_format: str = "GeoJSON",
+        bands: list = None,
+        scale: int = 30,
+        reducer: str = "first",
+        frequency: str = "month",
+        temporal_reducer: str = "median",
+        region: list = None,
+        cloud_cover: int = None,
+        cloud_property: str = "CLOUDY_PIXEL_PERCENTAGE",
+        property_filters: list = None,
+        month_start: int = None,
+        month_end: int = None,
+        batch_size: int = 25,
+        time_series_images: list = None,
+        time_series_labels: list = None,
+    ):
+        """Initialize the vector time series extraction worker.
+
+        Args:
+            asset_id: Earth Engine ImageCollection asset ID.
+            vector_features: Vector feature dictionaries with geometry and properties.
+            start_date: Start date in YYYY-MM-DD format.
+            end_date: End date in YYYY-MM-DD format.
+            output_path: Optional destination vector file path.
+            vector_format: Display name for the destination vector format.
+            bands: Optional band names to extract.
+            scale: Pixel extraction scale in meters.
+            reducer: Reducer to apply over each input geometry.
+            frequency: Temporal frequency for building time series composites.
+            temporal_reducer: Reducer for each time series composite.
+            region: Optional time series region as [west, south, east, north].
+            cloud_cover: Optional maximum cloud cover value.
+            cloud_property: Cloud cover property name.
+            property_filters: Optional ImageCollection property filters.
+            month_start: Optional start month for calendar filtering.
+            month_end: Optional end month for calendar filtering.
+            batch_size: Number of vector features to reduce per Earth Engine request.
+            time_series_images: Optional prebuilt time series images.
+            time_series_labels: Optional labels for prebuilt time series images.
+        """
+        super().__init__()
+        self.asset_id = asset_id
+        self.vector_features = vector_features
+        self.start_date = start_date
+        self.end_date = end_date
+        self.output_path = output_path
+        self.vector_format = vector_format
+        self.bands = bands
+        self.scale = scale
+        self.reducer = reducer
+        self.frequency = frequency
+        self.temporal_reducer = temporal_reducer
+        self.region = region
+        self.cloud_cover = cloud_cover
+        self.cloud_property = cloud_property
+        self.property_filters = property_filters or []
+        self.month_start = month_start
+        self.month_end = month_end
+        self.batch_size = max(1, batch_size)
+        self.time_series_images = time_series_images or []
+        self.time_series_labels = time_series_labels or []
+        self._skipped_empty_steps = 0
+
+    def _apply_property_filters(self, collection):
+        """Apply configured property filters to an ImageCollection.
+
+        Args:
+            collection: Earth Engine ImageCollection.
+
+        Returns:
+            Filtered Earth Engine ImageCollection.
+        """
+        import ee
+
+        for prop_name, op, value in self.property_filters:
+            if op == "==":
+                collection = collection.filter(ee.Filter.eq(prop_name, value))
+            elif op == "!=":
+                collection = collection.filter(ee.Filter.neq(prop_name, value))
+            elif op == ">":
+                collection = collection.filter(ee.Filter.gt(prop_name, value))
+            elif op == ">=":
+                collection = collection.filter(ee.Filter.gte(prop_name, value))
+            elif op == "<":
+                collection = collection.filter(ee.Filter.lt(prop_name, value))
+            elif op == "<=":
+                collection = collection.filter(ee.Filter.lte(prop_name, value))
+        return collection
+
+    def _apply_month_filter(self, collection):
+        """Apply the configured month range filter to an ImageCollection.
+
+        Args:
+            collection: Earth Engine ImageCollection.
+
+        Returns:
+            Filtered Earth Engine ImageCollection.
+        """
+        import ee
+
+        if self.month_start is None or self.month_end is None:
+            return collection
+
+        if self.month_start <= self.month_end:
+            return collection.filter(
+                ee.Filter.calendarRange(self.month_start, self.month_end, "month")
+            )
+
+        return collection.filter(
+            ee.Filter.Or(
+                ee.Filter.calendarRange(self.month_start, 12, "month"),
+                ee.Filter.calendarRange(1, self.month_end, "month"),
+            )
+        )
+
+    def _format_info(self):
+        """Return the vector driver and extension for the selected output format.
+
+        Returns:
+            Tuple of GDAL driver name and filename extension.
+        """
+        format_map = {
+            "GeoJSON": ("GeoJSON", ".geojson"),
+            "GPKG (GeoPackage)": ("GPKG", ".gpkg"),
+            "ESRI Shapefile": ("ESRI Shapefile", ".shp"),
+            "FlatGeobuf": ("FlatGeobuf", ".fgb"),
+            "Parquet (GeoParquet)": ("Parquet", ".parquet"),
+            "CSV": ("CSV", ".csv"),
+        }
+        return format_map.get(self.vector_format, ("GeoJSON", ".geojson"))
+
+    def _resolved_output_path(self):
+        """Return an explicit or temporary output path for the extraction.
+
+        Returns:
+            Output file path with an extension matching the selected format.
+        """
+        import os
+        import tempfile
+        import uuid
+
+        _, extension = self._format_info()
+        output_path = self.output_path.strip()
+        if not output_path:
+            filename = f"gee_vector_timeseries_{uuid.uuid4().hex}{extension}"
+            return os.path.join(tempfile.gettempdir(), filename)
+
+        if not output_path.lower().endswith(extension):
+            output_path += extension
+        return output_path
+
+    def _ee_reducer(self):
+        """Return the selected Earth Engine geometry reducer.
+
+        Returns:
+            An Earth Engine reducer object.
+        """
+        import ee
+
+        reducers = {
+            "first": ee.Reducer.first,
+            "mean": ee.Reducer.mean,
+            "median": ee.Reducer.median,
+            "min": ee.Reducer.min,
+            "max": ee.Reducer.max,
+            "sum": ee.Reducer.sum,
+            "mode": ee.Reducer.mode,
+            "count": ee.Reducer.count,
+            "stdDev": ee.Reducer.stdDev,
+        }
+        return reducers.get(self.reducer, ee.Reducer.first)()
+
+    def _temporal_ee_reducer(self):
+        """Return the selected temporal reducer for time series composites.
+
+        Returns:
+            An Earth Engine reducer object.
+        """
+        import ee
+
+        reducers = {
+            "median": ee.Reducer.median,
+            "mean": ee.Reducer.mean,
+            "min": ee.Reducer.min,
+            "max": ee.Reducer.max,
+            "first": ee.Reducer.first,
+            "sum": ee.Reducer.sum,
+        }
+        return reducers.get(self.temporal_reducer, ee.Reducer.median)()
+
+    def _frequency_settings(self):
+        """Return the interval unit and step for the selected frequency.
+
+        Returns:
+            Tuple of interval unit and step size.
+        """
+        freq_dict = {
+            "day": ("day", 1),
+            "week": ("day", 7),
+            "month": ("month", 1),
+            "quarter": ("month", 3),
+            "year": ("year", 1),
+        }
+        return freq_dict.get(self.frequency, ("month", 1))
+
+    def _is_month_in_range(self, month: int) -> bool:
+        """Return whether a month is allowed by the configured month filter.
+
+        Args:
+            month: Month number from 1 to 12.
+
+        Returns:
+            True if the month should be included.
+        """
+        if self.month_start is None or self.month_end is None:
+            return True
+        if self.month_start <= self.month_end:
+            return self.month_start <= month <= self.month_end
+        return month >= self.month_start or month <= self.month_end
+
+    def _time_label(self, date_str: str) -> str:
+        """Return a display label for a time series date.
+
+        Args:
+            date_str: Start date for a time step in YYYY-MM-DD format.
+
+        Returns:
+            Human-readable time step label.
+        """
+        from datetime import datetime
+
+        if self.frequency == "day":
+            return date_str
+        if self.frequency == "week":
+            return f"Week of {date_str}"
+        if self.frequency == "month":
+            return datetime.strptime(date_str, "%Y-%m-%d").strftime("%Y-%m")
+        if self.frequency == "quarter":
+            dt = datetime.strptime(date_str, "%Y-%m-%d")
+            quarter = (dt.month - 1) // 3 + 1
+            return f"{dt.year} Q{quarter}"
+        if self.frequency == "year":
+            return datetime.strptime(date_str, "%Y-%m-%d").strftime("%Y")
+        return date_str
+
+    def _time_series_steps(self):
+        """Build time step start dates for the configured time series.
+
+        Returns:
+            List of start dates in YYYY-MM-DD format.
+        """
+        from datetime import datetime
+        from dateutil.relativedelta import relativedelta
+
+        unit, step = self._frequency_settings()
+        start_dt = datetime.strptime(self.start_date, "%Y-%m-%d")
+        end_dt = datetime.strptime(self.end_date, "%Y-%m-%d")
+
+        dates = []
+        current = start_dt
+        while current < end_dt:
+            if self._is_month_in_range(current.month):
+                dates.append(current.strftime("%Y-%m-%d"))
+            if unit == "day":
+                current += relativedelta(days=step)
+            elif unit == "month":
+                current += relativedelta(months=step)
+            elif unit == "year":
+                current += relativedelta(years=step)
+        return dates
+
+    def _select_existing_image_bands(self, image):
+        """Select requested bands from a prebuilt time series image.
+
+        Args:
+            image: Earth Engine image.
+
+        Returns:
+            Earth Engine image with requested bands selected, or None if empty.
+        """
+        band_names = image.bandNames().getInfo()
+        if not band_names:
+            self._skipped_empty_steps += 1
+            return None
+
+        if not self.bands:
+            return image
+
+        selected = []
+        for band in self.bands:
+            if band in band_names:
+                selected.append(band)
+                continue
+            reduced_band = f"{band}_{self.temporal_reducer}"
+            if reduced_band in band_names:
+                selected.append(reduced_band)
+
+        if not selected:
+            raise ValueError(
+                f"None of the specified bands ({', '.join(self.bands)}) exist in the time series image.\n"
+                f"Available bands: {', '.join(band_names)}"
+            )
+        return image.select(selected)
+
+    def _build_time_series_images(self, vectors_fc):
+        """Build temporal composite images for vector extraction.
+
+        Args:
+            vectors_fc: Earth Engine FeatureCollection used for optional bounds filtering.
+
+        Returns:
+            List of dictionaries with image, date, label, and timestamp fields.
+        """
+        import ee
+
+        if self.time_series_images:
+            steps = []
+            for index, image in enumerate(self.time_series_images):
+                label = (
+                    self.time_series_labels[index]
+                    if index < len(self.time_series_labels)
+                    else f"Step {index + 1}"
+                )
+                image = self._select_existing_image_bands(ee.Image(image))
+                if image is None:
+                    continue
+                steps.append(
+                    {
+                        "image": image,
+                        "date": label,
+                        "label": label,
+                        "timestamp": image.get("system:time_start"),
+                    }
+                )
+            return steps
+
+        collection = ee.ImageCollection(self.asset_id).filterDate(
+            self.start_date, self.end_date
+        )
+
+        region_geom = None
+        if self.region:
+            region_geom = ee.Geometry.Rectangle(self.region, geodesic=False)
+            collection = collection.filterBounds(region_geom)
+        else:
+            collection = collection.filterBounds(vectors_fc.geometry())
+
+        if self.cloud_cover is not None:
+            collection = collection.filter(
+                ee.Filter.lt(self.cloud_property, self.cloud_cover)
+            )
+
+        if self.property_filters:
+            collection = self._apply_property_filters(collection)
+
+        collection = self._apply_month_filter(collection)
+
+        size = collection.size().getInfo()
+        if size == 0:
+            return []
+
+        first_image = collection.first()
+        all_band_names = first_image.bandNames().getInfo()
+        if self.bands:
+            valid_bands = [band for band in self.bands if band in all_band_names]
+            if not valid_bands:
+                raise ValueError(
+                    f"None of the specified bands ({', '.join(self.bands)}) exist in the collection.\n"
+                    f"Available bands: {', '.join(all_band_names)}"
+                )
+            collection = collection.select(valid_bands)
+
+        unit, step = self._frequency_settings()
+        reducer = self._temporal_ee_reducer()
+        time_steps = []
+
+        for date_str in self._time_series_steps():
+            start = ee.Date(date_str)
+            if unit == "day":
+                end = start.advance(step, "day")
+            elif unit == "month":
+                end = start.advance(step, "month")
+            elif unit == "year":
+                end = start.advance(step, "year")
+            else:
+                end = start.advance(step, "month")
+
+            sub_col = collection.filterDate(start, end)
+            if sub_col.size().getInfo() == 0:
+                continue
+
+            image = sub_col.reduce(reducer)
+            if region_geom:
+                image = image.clip(region_geom)
+            if not image.bandNames().getInfo():
+                self._skipped_empty_steps += 1
+                continue
+
+            label = self._time_label(date_str)
+            time_steps.append(
+                {
+                    "image": image,
+                    "date": date_str,
+                    "label": label,
+                    "timestamp": start.millis(),
+                }
+            )
+
+        return time_steps
+
+    def run(self):
+        """Extract ImageCollection values and write them to a vector file."""
+        try:
+            import ee
+
+            try:
+                import geopandas as gpd
+                import pandas as pd
+            except ImportError as exc:
+                raise ImportError(
+                    "geopandas and pandas are required for vector time series extraction.\n"
+                    "Please install them: pip install geopandas pandas"
+                ) from exc
+
+            if not self.vector_features:
+                self.error.emit("No vector features were provided.")
+                return
+
+            self.progress.emit("Preparing vector features...")
+            ee_features = []
+            for vector_feature in self.vector_features:
+                properties = vector_feature.get("properties", {})
+                ee_features.append(
+                    ee.Feature(ee.Geometry(vector_feature["geometry"]), properties)
+                )
+
+            vectors_fc = ee.FeatureCollection(ee_features)
+
+            if self.time_series_images:
+                self.progress.emit("Using the current Time Series images...")
+            else:
+                self.progress.emit("Building Time Series composites...")
+            time_steps = self._build_time_series_images(vectors_fc)
+            size = len(time_steps)
+            if self._skipped_empty_steps:
+                self.progress.emit(
+                    f"Skipped {self._skipped_empty_steps} empty time step(s)."
+                )
+            if size == 0:
+                self.error.emit(
+                    "No non-empty time series images found for the selected settings."
+                )
+                return
+
+            feature_count = len(self.vector_features)
+            self.progress.emit(
+                f"Reducing {feature_count} vector feature(s) across {size} time step(s)..."
+            )
+            reducer = self._ee_reducer()
+            gdfs = []
+
+            for index, time_step in enumerate(time_steps):
+                image = ee.Image(time_step["image"])
+                image_date = time_step["date"]
+                image_label = time_step["label"]
+                image_timestamp = time_step["timestamp"]
+
+                def add_image_metadata(feature):
+                    """Add image metadata to a sampled vector feature."""
+                    return feature.set(
+                        {
+                            "date": image_date,
+                            "time_label": image_label,
+                            "timestamp": image_timestamp,
+                            "image_id": image_label,
+                        }
+                    )
+
+                for start in range(0, feature_count, self.batch_size):
+                    end = min(start + self.batch_size, feature_count)
+                    chunk_fc = ee.FeatureCollection(ee_features[start:end])
+                    sampled = image.reduceRegions(
+                        collection=chunk_fc,
+                        reducer=reducer,
+                        scale=self.scale,
+                        tileScale=4,
+                    )
+                    sampled = sampled.map(add_image_metadata)
+
+                    self.progress.emit(
+                        f"Fetching time step {index + 1}/{size}, features {start + 1}-{end}/{feature_count}..."
+                    )
+                    try:
+                        image_gdf = ee.data.computeFeatures(
+                            {
+                                "expression": sampled,
+                                "fileFormat": "GEOPANDAS_GEODATAFRAME",
+                            }
+                        )
+                    except Exception:
+                        result = sampled.getInfo()
+                        if "features" not in result:
+                            raise RuntimeError(
+                                "Failed to fetch sampled vector features"
+                            )
+                        image_gdf = gpd.GeoDataFrame.from_features(result["features"])
+
+                    if not image_gdf.empty:
+                        gdfs.append(image_gdf)
+
+            if not gdfs:
+                self.error.emit("No sampled vector values were returned.")
+                return
+
+            gdf = gpd.GeoDataFrame(
+                pd.concat(gdfs, ignore_index=True),
+                crs=gdfs[0].crs,
+            )
+            output_path = self._resolved_output_path()
+            driver, _ = self._format_info()
+
+            if gdf.empty:
+                self.error.emit("No sampled vector values were returned.")
+                return
+
+            if gdf.crs is None:
+                gdf = gdf.set_crs("EPSG:4326")
+
+            self.progress.emit(f"Writing {len(gdf)} sampled feature(s)...")
+            if driver == "Parquet":
+                gdf.to_parquet(output_path)
+            else:
+                gdf.to_file(output_path, driver=driver)
+
+            self.finished.emit(output_path, len(gdf))
+
+        except Exception as e:
+            import traceback
+
+            self.error.emit(f"{str(e)}\n{traceback.format_exc()}")
+
+
 class TimeSeriesChartDialog(QWidget):
     """Dialog for displaying interactive time series charts."""
 
@@ -2539,6 +3095,7 @@ class CatalogDockWidget(QDockWidget):
         self._timeseries_playing = False
         self._timeseries_current_index = 0
         self._ts_export_thread = None
+        self._ts_points_extract_thread = None
 
         # Drawn bounding box storage
         self._ts_drawn_bbox = None  # [west, south, east, north]
@@ -3802,6 +4359,116 @@ class CatalogDockWidget(QDockWidget):
         ts_export_layout.addRow("", self.ts_export_status_label)
 
         layout.addWidget(ts_export_group)
+
+        # ==================== Extract Time Series to Vector Features ====================
+        ts_points_group = QGroupBox("Extract Pixel Values to Vector Features")
+        ts_points_group.setStyleSheet(
+            "QGroupBox { font-weight: bold; border: 2px solid #16a085; "
+            "border-radius: 5px; margin-top: 10px; padding-top: 10px; }"
+            "QGroupBox::title { subcontrol-origin: margin; left: 10px; "
+            "padding: 0 5px; color: #117a65; }"
+        )
+        ts_points_layout = QFormLayout(ts_points_group)
+
+        point_layer_layout = QHBoxLayout()
+        self.ts_points_layer_combo = QComboBox()
+        point_layer_layout.addWidget(self.ts_points_layer_combo, 1)
+
+        self.ts_points_refresh_btn = QPushButton("↻")
+        self.ts_points_refresh_btn.setMaximumWidth(32)
+        self.ts_points_refresh_btn.setToolTip("Refresh vector layers")
+        self.ts_points_refresh_btn.clicked.connect(self._refresh_ts_point_layers)
+        point_layer_layout.addWidget(self.ts_points_refresh_btn)
+        ts_points_layout.addRow("Vector Layer:", point_layer_layout)
+
+        point_file_layout = QHBoxLayout()
+        self.ts_points_file_input = QLineEdit()
+        self.ts_points_file_input.setPlaceholderText(
+            "Optional vector file, e.g., GeoJSON, Shapefile, GeoPackage"
+        )
+        point_file_layout.addWidget(self.ts_points_file_input, 1)
+
+        self.ts_points_file_browse_btn = QPushButton("Browse...")
+        self.ts_points_file_browse_btn.clicked.connect(self._browse_ts_points_input)
+        point_file_layout.addWidget(self.ts_points_file_browse_btn)
+        ts_points_layout.addRow("Vector File:", point_file_layout)
+
+        self.ts_points_bands_input = QLineEdit()
+        self.ts_points_bands_input.setPlaceholderText(
+            "Optional comma-separated bands, or leave empty for all bands"
+        )
+        self.ts_points_bands_input.setToolTip(
+            "Comma-separated list of bands to extract. Leave empty to extract all bands."
+        )
+        ts_points_layout.addRow("Bands:", self.ts_points_bands_input)
+
+        self.ts_points_scale_spin = QSpinBox()
+        self.ts_points_scale_spin.setRange(1, 10000)
+        self.ts_points_scale_spin.setValue(30)
+        self.ts_points_scale_spin.setSuffix(" m")
+        self.ts_points_scale_spin.setToolTip("Pixel extraction scale in meters")
+        ts_points_layout.addRow("Scale:", self.ts_points_scale_spin)
+
+        self.ts_points_reducer_combo = QComboBox()
+        self.ts_points_reducer_combo.addItems(
+            ["first", "mean", "median", "min", "max", "sum", "mode", "count", "stdDev"]
+        )
+        self.ts_points_reducer_combo.setToolTip(
+            "Reducer applied to all pixels intersecting each vector feature"
+        )
+        ts_points_layout.addRow("Reducer:", self.ts_points_reducer_combo)
+
+        self.ts_points_format_combo = QComboBox()
+        self.ts_points_format_combo.addItems(
+            [
+                "GeoJSON",
+                "GPKG (GeoPackage)",
+                "ESRI Shapefile",
+                "FlatGeobuf",
+                "Parquet (GeoParquet)",
+                "CSV",
+            ]
+        )
+        ts_points_layout.addRow("Output Format:", self.ts_points_format_combo)
+
+        points_output_layout = QHBoxLayout()
+        self.ts_points_output_input = QLineEdit()
+        self.ts_points_output_input.setPlaceholderText(
+            "Optional output file, leave empty to use a temporary file"
+        )
+        points_output_layout.addWidget(self.ts_points_output_input, 1)
+
+        self.ts_points_output_browse_btn = QPushButton("Browse...")
+        self.ts_points_output_browse_btn.clicked.connect(self._browse_ts_points_output)
+        points_output_layout.addWidget(self.ts_points_output_browse_btn)
+        ts_points_layout.addRow("Output File:", points_output_layout)
+
+        self.ts_points_extract_btn = QPushButton("Extract to Vector File")
+        self.ts_points_extract_btn.clicked.connect(self._extract_timeseries_to_points)
+        self.ts_points_extract_btn.setToolTip(
+            "Extract ImageCollection pixel values for all input vector features and write a new vector file"
+        )
+        self.ts_points_extract_btn.setStyleSheet(
+            "QPushButton { background-color: #16a085; color: white; font-weight: bold; }"
+            "QPushButton:disabled { background-color: #bdc3c7; color: #7f8c8d; }"
+        )
+        ts_points_layout.addRow("", self.ts_points_extract_btn)
+
+        self.ts_points_progress = QProgressBar()
+        self.ts_points_progress.setMinimum(0)
+        self.ts_points_progress.setMaximum(0)
+        self.ts_points_progress.setVisible(False)
+        ts_points_layout.addRow("", self.ts_points_progress)
+
+        self.ts_points_status_label = QLabel(
+            "Select a vector layer or file to extract pixel values."
+        )
+        self.ts_points_status_label.setWordWrap(True)
+        self.ts_points_status_label.setStyleSheet("color: gray; font-size: 10px;")
+        ts_points_layout.addRow("", self.ts_points_status_label)
+
+        layout.addWidget(ts_points_group)
+        self._refresh_ts_point_layers()
 
         # Separator
         separator = QLabel("")
@@ -5955,6 +6622,8 @@ class CatalogDockWidget(QDockWidget):
             self._refresh_export_layers()
             self._refresh_vector_layers()
             self._refresh_export_history()
+        elif current_widget == getattr(self, "timeseries_tab", None):
+            self._refresh_ts_point_layers()
         elif current_widget == getattr(self, "favorites_tab", None):
             self._refresh_saved_datasets()
         elif current_widget == getattr(self, "project_tab", None):
@@ -8778,6 +9447,363 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
 
     # ==================== End Pixel Time Series Inspector Methods ====================
 
+    # ==================== Time Series Vector Extraction Methods ====================
+
+    def _refresh_ts_point_layers(self):
+        """Refresh the Time Series tab vector layer dropdown."""
+        if not hasattr(self, "ts_points_layer_combo"):
+            return
+
+        self.ts_points_layer_combo.clear()
+        self.ts_points_layer_combo.addItem("-- Use vector file below --", None)
+
+        for layer in QgsProject.instance().mapLayers().values():
+            if layer.type() != layer.VectorLayer:
+                continue
+            self.ts_points_layer_combo.addItem(layer.name(), layer.id())
+
+    def _ts_points_format_info(self):
+        """Return the file dialog filter and extension for the selected format.
+
+        Returns:
+            Tuple of file dialog filter string and filename extension.
+        """
+        format_map = {
+            "GeoJSON": ("GeoJSON (*.geojson);;All Files (*)", ".geojson"),
+            "GPKG (GeoPackage)": ("GeoPackage (*.gpkg);;All Files (*)", ".gpkg"),
+            "ESRI Shapefile": ("Shapefile (*.shp);;All Files (*)", ".shp"),
+            "FlatGeobuf": ("FlatGeobuf (*.fgb);;All Files (*)", ".fgb"),
+            "Parquet (GeoParquet)": (
+                "GeoParquet (*.parquet);;All Files (*)",
+                ".parquet",
+            ),
+            "CSV": ("CSV (*.csv);;All Files (*)", ".csv"),
+        }
+        fmt = self.ts_points_format_combo.currentText()
+        return format_map.get(fmt, ("GeoJSON (*.geojson);;All Files (*)", ".geojson"))
+
+    def _browse_ts_points_input(self):
+        """Open a file dialog to choose an input vector file."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Vector File",
+            "",
+            "Vector Files (*.geojson *.json *.gpkg *.shp *.fgb *.parquet *.csv);;All Files (*)",
+        )
+        if file_path:
+            self.ts_points_file_input.setText(file_path)
+
+    def _browse_ts_points_output(self):
+        """Open a file dialog to choose the output vector file."""
+        filter_str, extension = self._ts_points_format_info()
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Extracted Vectors As", "", filter_str
+        )
+        if file_path:
+            if not file_path.lower().endswith(extension):
+                file_path += extension
+            self.ts_points_output_input.setText(file_path)
+
+    def _safe_ee_property_value(self, value):
+        """Convert QGIS attribute values into Earth Engine-safe properties.
+
+        Args:
+            value: Attribute value from a QGIS feature.
+
+        Returns:
+            JSON-compatible scalar value.
+        """
+        if value is None:
+            return None
+        if isinstance(value, (str, int, float, bool)):
+            return value
+        if hasattr(value, "toPyDateTime"):
+            return value.toPyDateTime().isoformat()
+        if hasattr(value, "toPyDate"):
+            return value.toPyDate().isoformat()
+        if hasattr(value, "isoformat"):
+            return value.isoformat()
+        return str(value)
+
+    def _collect_ts_vector_features(self):
+        """Collect vector features from the selected layer or file.
+
+        Returns:
+            List of dictionaries with WGS84 geometries and properties, or None
+            when validation fails.
+        """
+        import json
+        import os
+
+        from qgis.core import (
+            QgsCoordinateReferenceSystem,
+            QgsCoordinateTransform,
+            QgsGeometry,
+            QgsVectorLayer,
+        )
+
+        point_file = self.ts_points_file_input.text().strip()
+        if point_file:
+            layer = QgsVectorLayer(point_file, os.path.basename(point_file), "ogr")
+            if not layer.isValid():
+                QMessageBox.warning(
+                    self, "Invalid Vector File", "Vector file is invalid."
+                )
+                return None
+        else:
+            layer_id = self.ts_points_layer_combo.currentData()
+            if not layer_id:
+                QMessageBox.warning(
+                    self,
+                    "No Vector Source",
+                    "Select a vector layer or browse to a vector file.",
+                )
+                return None
+            layer = QgsProject.instance().mapLayer(layer_id)
+            if not layer:
+                QMessageBox.warning(
+                    self, "Missing Vector Layer", "Vector layer not found."
+                )
+                return None
+
+        wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
+        transform = None
+        if layer.crs().isValid() and layer.crs().authid() != "EPSG:4326":
+            transform = QgsCoordinateTransform(
+                layer.crs(), wgs84, QgsProject.instance()
+            )
+
+        field_names = [field.name() for field in layer.fields()]
+        feature_id_name = "gee_feature_id"
+        source_fid_name = "gee_source_fid"
+        while feature_id_name in field_names:
+            feature_id_name += "_"
+        while source_fid_name in field_names:
+            source_fid_name += "_"
+
+        vector_features = []
+        feature_id = 1
+        for feature in layer.getFeatures():
+            geometry = feature.geometry()
+            if geometry is None or geometry.isEmpty():
+                continue
+
+            geometry = QgsGeometry(geometry)
+            if transform is not None:
+                geometry.transform(transform)
+
+            properties = {
+                name: self._safe_ee_property_value(value)
+                for name, value in zip(field_names, feature.attributes())
+            }
+            properties[source_fid_name] = int(feature.id())
+
+            properties[feature_id_name] = feature_id
+            vector_features.append(
+                {
+                    "geometry": json.loads(geometry.asJson()),
+                    "properties": properties,
+                }
+            )
+            feature_id += 1
+
+        if not vector_features:
+            QMessageBox.warning(
+                self,
+                "No Features",
+                "No valid geometries were found in the selected source.",
+            )
+            return None
+
+        return vector_features
+
+    def _set_ts_points_extract_enabled(self, enabled: bool):
+        """Enable or disable vector extraction controls.
+
+        Args:
+            enabled: Whether controls should be enabled.
+        """
+        controls = [
+            self.ts_points_layer_combo,
+            self.ts_points_refresh_btn,
+            self.ts_points_file_input,
+            self.ts_points_file_browse_btn,
+            self.ts_points_bands_input,
+            self.ts_points_scale_spin,
+            self.ts_points_reducer_combo,
+            self.ts_points_format_combo,
+            self.ts_points_output_input,
+            self.ts_points_output_browse_btn,
+            self.ts_points_extract_btn,
+        ]
+        for control in controls:
+            control.setEnabled(enabled)
+
+    def _extract_timeseries_to_points(self):
+        """Extract ImageCollection pixel values to an output vector file."""
+        if ee is None:
+            QMessageBox.warning(
+                self,
+                "Warning",
+                "Earth Engine API not available. Please install earthengine-api.",
+            )
+            return
+
+        if (
+            self._ts_points_extract_thread is not None
+            and self._ts_points_extract_thread.isRunning()
+        ):
+            self.ts_points_status_label.setText("Vector extraction is already running.")
+            return
+
+        asset_id = self.ts_dataset_id_input.text().strip()
+        if not asset_id:
+            QMessageBox.warning(self, "Warning", "Please enter an asset ID.")
+            return
+
+        output_path = self.ts_points_output_input.text().strip()
+
+        vector_features = self._collect_ts_vector_features()
+        if vector_features is None:
+            return
+
+        bands = None
+        bands_text = self.ts_points_bands_input.text().strip()
+        if bands_text:
+            bands = [
+                band.strip().strip("\"'")
+                for band in bands_text.split(",")
+                if band.strip()
+            ]
+
+        cloud_cover = None
+        if self.ts_use_cloud_filter.isChecked():
+            cloud_cover = self.ts_cloud_cover_spin.value()
+        custom_cloud_property = self.ts_cloud_property_input.text().strip()
+        cloud_property = self._get_cloud_property(asset_id, custom_cloud_property)
+
+        property_filters = self._parse_property_filters(
+            self.ts_property_filters.toPlainText()
+        )
+
+        month_start = None
+        month_end = None
+        if self.ts_use_month_filter.isChecked():
+            month_start = self.ts_month_start_spin.value()
+            month_end = self.ts_month_end_spin.value()
+
+        region = self._get_spatial_filter_ts()
+        time_series_images = self._timeseries_collection or []
+        time_series_labels = self._timeseries_labels or []
+
+        self.ts_points_progress.setVisible(True)
+        time_series_source = (
+            "current Time Series" if time_series_images else "Time Series composites"
+        )
+        if output_path:
+            status = (
+                f"Extracting {time_series_source} values for "
+                f"{len(vector_features)} vector feature(s)..."
+            )
+        else:
+            status = (
+                f"Extracting {time_series_source} values for "
+                f"{len(vector_features)} vector feature(s) to a temporary file..."
+            )
+        self.ts_points_status_label.setText(status)
+        self.ts_points_status_label.setStyleSheet("color: #2980b9; font-size: 10px;")
+        self._set_ts_points_extract_enabled(False)
+        QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
+
+        self._ts_points_extract_thread = VectorTimeSeriesExtractionWorker(
+            asset_id=asset_id,
+            vector_features=vector_features,
+            start_date=self.ts_start_date.date().toString("yyyy-MM-dd"),
+            end_date=self.ts_end_date.date().toString("yyyy-MM-dd"),
+            output_path=output_path,
+            vector_format=self.ts_points_format_combo.currentText(),
+            bands=bands,
+            scale=self.ts_points_scale_spin.value(),
+            reducer=self.ts_points_reducer_combo.currentText(),
+            frequency=self.ts_frequency_combo.currentText(),
+            temporal_reducer=self.ts_reducer_combo.currentText(),
+            region=region,
+            cloud_cover=cloud_cover,
+            cloud_property=cloud_property,
+            property_filters=property_filters,
+            month_start=month_start,
+            month_end=month_end,
+            time_series_images=time_series_images,
+            time_series_labels=time_series_labels,
+        )
+        self._ts_points_extract_thread.progress.connect(
+            self._on_ts_points_extract_progress
+        )
+        self._ts_points_extract_thread.finished.connect(
+            self._on_ts_points_extract_finished
+        )
+        self._ts_points_extract_thread.error.connect(self._on_ts_points_extract_error)
+        self._ts_points_extract_thread.start()
+
+    def _on_ts_points_extract_progress(self, message: str):
+        """Handle vector extraction progress messages.
+
+        Args:
+            message: Progress message to display.
+        """
+        self.ts_points_status_label.setText(message)
+
+    def _on_ts_points_extract_finished(self, output_path: str, feature_count: int):
+        """Handle successful vector time series extraction.
+
+        Args:
+            output_path: Written vector file path.
+            feature_count: Number of sampled output features.
+        """
+        import os
+
+        QApplication.restoreOverrideCursor()
+        self.ts_points_progress.setVisible(False)
+        self._set_ts_points_extract_enabled(True)
+        self.ts_points_output_input.setText(output_path)
+        self.ts_points_status_label.setText(
+            f"Extracted {feature_count} feature(s) to: {output_path}"
+        )
+        self.ts_points_status_label.setStyleSheet("color: #27ae60; font-size: 10px;")
+
+        reply = QMessageBox.question(
+            self,
+            "Extraction Complete",
+            f"Vector values exported successfully to:\n{output_path}\n\nAdd layer to map?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            from qgis.core import QgsVectorLayer
+
+            layer_name = os.path.splitext(os.path.basename(output_path))[0]
+            layer = QgsVectorLayer(output_path, layer_name, "ogr")
+            if layer.isValid():
+                QgsProject.instance().addMapLayer(layer)
+
+    def _on_ts_points_extract_error(self, error_msg: str):
+        """Handle vector time series extraction errors.
+
+        Args:
+            error_msg: Error message from the worker.
+        """
+        QApplication.restoreOverrideCursor()
+        self.ts_points_progress.setVisible(False)
+        self._set_ts_points_extract_enabled(True)
+        self.ts_points_status_label.setText(f"Error: {error_msg[:120]}...")
+        self.ts_points_status_label.setStyleSheet("color: #e74c3c; font-size: 10px;")
+        QMessageBox.critical(
+            self,
+            "Vector Extraction Error",
+            f"Failed to extract vector values:\n\n{error_msg}",
+        )
+
+    # ==================== End Time Series Vector Extraction Methods ====================
+
     def _create_timeseries(self):
         """Create a time series from the specified ImageCollection."""
         if ee is None:
@@ -9828,6 +10854,12 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
         if self._timeseries_thread and self._timeseries_thread.isRunning():
             self._timeseries_thread.terminate()
             self._timeseries_thread.wait()
+        if (
+            self._ts_points_extract_thread
+            and self._ts_points_extract_thread.isRunning()
+        ):
+            self._ts_points_extract_thread.terminate()
+            self._ts_points_extract_thread.wait()
 
         event.accept()
 
