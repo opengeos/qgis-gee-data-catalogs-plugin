@@ -3164,7 +3164,6 @@ class CatalogDockWidget(QDockWidget):
         self._timeseries_images = []
         self._timeseries_labels = []
         self._timeseries_collection = None
-        self._timeseries_fingerprint = None
         self._timeseries_vis_params = {}
         self._timeseries_timer = None
         self._timeseries_playing = False
@@ -9524,63 +9523,6 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
 
     # ==================== Time Series Vector Extraction Methods ====================
 
-    def _compute_ts_fingerprint(self):
-        """Capture the Time Series UI state that affects composite content.
-
-        Returns:
-            Hashable tuple summarising the settings used to build the cached
-            time series composites. Used to detect when the cached
-            ``_timeseries_collection`` has gone stale relative to the current
-            UI state.
-        """
-        asset_id = self.ts_dataset_id_input.text().strip()
-        start_date = self.ts_start_date.date().toString("yyyy-MM-dd")
-        end_date = self.ts_end_date.date().toString("yyyy-MM-dd")
-        frequency = self.ts_frequency_combo.currentText()
-        reducer = self.ts_reducer_combo.currentText()
-
-        bands_text = self.ts_bands_input.text().strip()
-        bands = tuple(
-            band.strip().strip("\"'") for band in bands_text.split(",") if band.strip()
-        )
-
-        region = self._get_spatial_filter_ts()
-        region_key = tuple(region) if region else None
-
-        cloud_cover = None
-        if self.ts_use_cloud_filter.isChecked():
-            cloud_cover = self.ts_cloud_cover_spin.value()
-        custom_cloud_property = self.ts_cloud_property_input.text().strip()
-        cloud_property = self._get_cloud_property(asset_id, custom_cloud_property)
-
-        property_filters = tuple(
-            tuple(item)
-            for item in self._parse_property_filters(
-                self.ts_property_filters.toPlainText()
-            )
-        )
-
-        month_start = None
-        month_end = None
-        if self.ts_use_month_filter.isChecked():
-            month_start = self.ts_month_start_spin.value()
-            month_end = self.ts_month_end_spin.value()
-
-        return (
-            asset_id,
-            start_date,
-            end_date,
-            frequency,
-            reducer,
-            bands,
-            region_key,
-            cloud_cover,
-            cloud_property,
-            property_filters,
-            month_start,
-            month_end,
-        )
-
     def _refresh_ts_point_layers(self):
         """Refresh the Time Series tab vector layer dropdown."""
         if not hasattr(self, "ts_points_layer_combo"):
@@ -9854,23 +9796,15 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
             month_end = self.ts_month_end_spin.value()
 
         region = self._get_spatial_filter_ts()
-        cached_collection = self._timeseries_collection or []
-        cached_labels = self._timeseries_labels or []
-        if (
-            cached_collection
-            and self._timeseries_fingerprint is not None
-            and self._timeseries_fingerprint == self._compute_ts_fingerprint()
-        ):
-            time_series_images = cached_collection
-            time_series_labels = cached_labels
-        else:
-            time_series_images = []
-            time_series_labels = []
+        # Always rebuild composites from the asset using the extraction
+        # tab's settings so that an empty bands input means "all bands" and
+        # is not silently constrained to whichever bands the cached
+        # visualization time series was built with.
+        time_series_images = []
+        time_series_labels = []
 
         self.ts_points_progress.setVisible(True)
-        time_series_source = (
-            "current Time Series" if time_series_images else "Time Series composites"
-        )
+        time_series_source = "Time Series composites"
         if output_path:
             status = (
                 f"Extracting {time_series_source} values for "
@@ -10133,7 +10067,6 @@ m.add_layer(dw, vis, 'Dynamic World 2023')""",
                 month_end=month_end,
                 date_strings=date_strings,
             )
-            self._timeseries_fingerprint = self._compute_ts_fingerprint()
 
             # Build visualization parameters
             self._timeseries_vis_params = self._build_ts_vis_params()
