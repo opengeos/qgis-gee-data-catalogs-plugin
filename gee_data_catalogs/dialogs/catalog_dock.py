@@ -784,7 +784,9 @@ class ExportWorkerThread(QThread):
         except ImportError as e:
             raise ImportError(
                 f"Required packages not available: {e}\n"
-                "Please install xarray and xee: pip install xarray xee"
+                "Open the plugin's Dependencies panel and click Install/Update "
+                "to add xee and xarray, or install them manually with: "
+                "pip install xarray xee"
             )
 
         self.progress.emit("Opening dataset with xee...")
@@ -820,7 +822,8 @@ class ExportWorkerThread(QThread):
         except ImportError:
             raise ImportError(
                 "rioxarray is required for COG export.\n"
-                "Please install it: pip install rioxarray"
+                "Open the plugin's Dependencies panel and click Install/Update "
+                "to add it, or install it manually with: pip install rioxarray"
             )
 
         # Handle xee dimension naming for rioxarray
@@ -931,7 +934,8 @@ class ExportWorkerThread(QThread):
         except ImportError:
             raise ImportError(
                 "geopandas is required for vector export.\n"
-                "Please install it: pip install geopandas"
+                "Open the plugin's Dependencies panel and click Install/Update "
+                "to add it, or install it manually with: pip install geopandas"
             )
 
         try:
@@ -1059,7 +1063,9 @@ class TimeSeriesExportWorkerThread(QThread):
         except ImportError as e:
             raise ImportError(
                 f"Required packages not available: {e}\n"
-                "Please install xarray and xee: pip install xarray xee"
+                "Open the plugin's Dependencies panel and click Install/Update "
+                "to add xee and xarray, or install them manually with: "
+                "pip install xarray xee"
             )
 
         # Convert region to ee.Geometry if needed
@@ -1094,7 +1100,8 @@ class TimeSeriesExportWorkerThread(QThread):
         except ImportError:
             raise ImportError(
                 "rioxarray is required for COG export.\n"
-                "Please install it: pip install rioxarray"
+                "Open the plugin's Dependencies panel and click Install/Update "
+                "to add it, or install it manually with: pip install rioxarray"
             )
 
         # Handle xee dimension naming for rioxarray
@@ -1822,7 +1829,9 @@ class VectorTimeSeriesExtractionWorker(QThread):
             except ImportError as exc:
                 raise ImportError(
                     "geopandas and pandas are required for vector time series extraction.\n"
-                    "Please install them: pip install geopandas pandas"
+                    "Open the plugin's Dependencies panel and click Install/Update "
+                    "to add them, or install them manually with: "
+                    "pip install geopandas pandas"
                 ) from exc
 
             if not self.vector_features:
@@ -6450,7 +6459,9 @@ class CatalogDockWidget(QDockWidget):
         except ImportError as e:
             raise ImportError(
                 f"Required packages not available: {e}\n"
-                "Please install xarray and xee: pip install xarray xee"
+                "Open the plugin's Dependencies panel and click Install/Update "
+                "to add xee and xarray, or install them manually with: "
+                "pip install xarray xee"
             )
 
         self.export_status_label.setText("Opening dataset with xee...")
@@ -6485,7 +6496,8 @@ class CatalogDockWidget(QDockWidget):
         except ImportError:
             raise ImportError(
                 "rioxarray is required for COG export.\n"
-                "Please install it: pip install rioxarray"
+                "Open the plugin's Dependencies panel and click Install/Update "
+                "to add it, or install it manually with: pip install rioxarray"
             )
 
         # Handle xee dimension naming for rioxarray
@@ -6632,7 +6644,8 @@ class CatalogDockWidget(QDockWidget):
         except ImportError:
             raise ImportError(
                 "geopandas is required for vector export.\n"
-                "Please install it: pip install geopandas"
+                "Open the plugin's Dependencies panel and click Install/Update "
+                "to add it, or install it manually with: pip install geopandas"
             )
 
         try:
