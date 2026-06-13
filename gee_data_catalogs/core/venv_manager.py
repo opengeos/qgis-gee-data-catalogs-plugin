@@ -26,6 +26,13 @@ REQUIRED_PACKAGES = [
     ("earthengine-api", ">=1.4.0"),
     ("geemap", ""),
     ("GeoAgent", "[providers]>=1.1.1"),
+    # Export dependencies: xee + rioxarray power Cloud Optimized GeoTIFF
+    # (COG) image exports, while geopandas backs the vector/feature exports.
+    # xarray and pandas are pulled in transitively (xee -> xarray,
+    # geopandas -> pandas), so they do not need to be listed explicitly.
+    ("xee", ""),
+    ("rioxarray", ""),
+    ("geopandas", ""),
 ]
 
 # Module-level guard so the "added venv site-packages to sys.path" message
