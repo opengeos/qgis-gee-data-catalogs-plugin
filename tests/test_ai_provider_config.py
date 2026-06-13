@@ -103,6 +103,15 @@ def test_geoagent_dependency_requires_generated_snippet_tool_version():
     assert ("GeoAgent", "[providers]>=1.1.1") in venv_manager.REQUIRED_PACKAGES
 
 
+def test_export_dependencies_in_required_packages():
+    """Export needs xee/rioxarray (COG images) and geopandas (vector features)."""
+    package_names = [name for name, _ in venv_manager.REQUIRED_PACKAGES]
+
+    assert "xee" in package_names, "xee required for Cloud Optimized GeoTIFF exports"
+    assert "rioxarray" in package_names, "rioxarray required for COG exports"
+    assert "geopandas" in package_names, "geopandas required for vector exports"
+
+
 def test_credential_value_prefers_saved_setting_over_environment(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "env-key")
     harness = _CredentialHarness({"GeeDataCatalogs/openai_api_key": "saved-key"})
