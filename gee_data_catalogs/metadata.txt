@@ -3,7 +3,7 @@ name=Earth Engine Data Catalogs
 qgisMinimumVersion=3.28
 qgisMaximumVersion=4.99
 description=Browse, search, and load Google Earth Engine data catalogs directly in QGIS.
-version=0.14.0
+version=0.14.1
 author=Qiusheng Wu
 email=giswqs@gmail.com
 
@@ -37,6 +37,8 @@ experimental=False
 deprecated=False
 
 changelog=
+    0.14.1
+        - Fix image and feature export failing with "No module named 'xee'" by installing xee, rioxarray, and geopandas into the managed environment (#74)
     0.14.0
         - Add extraction of Earth Engine image time series to vector features (points/polygons) with band selection, temporal aggregation, and filtering
     0.13.0
